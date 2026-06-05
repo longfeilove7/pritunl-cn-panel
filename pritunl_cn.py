@@ -175,6 +175,7 @@ function cd(n,cb){if(confirm('确定删除 "'+n+'" 吗？'))cb()}
 
 def R(tpl, **kw):
     kw['cu'] = session.get('user','')
+    kw['oid'] = oid  # Pass oid function to templates
     return render_template_string(BASE.replace('{% block c %}{% endblock %}', tpl), **kw)
 
 # ====== 登录/登出 ======
