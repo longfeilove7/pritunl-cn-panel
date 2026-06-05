@@ -1,7 +1,8 @@
 #!/usr/lib/pritunl/usr/bin/python3
 """
-Pritunl 中文管理面板 v2
-每个用户独立session，正确处理CSRF和cookie
+Pritunl 中文管理面板 v3
+完整功能版 - 对标英文版所有功能
+每次请求重新认证，避免与英文版session冲突
 """
 import os, sys, json, time, io
 import requests, urllib3
@@ -18,49 +19,49 @@ LISTEN_PORT = 8443
 # ====== API Client ======
 class PritunlAPI:
     def login(self, username, password):
+        """验证用户名密码，只保存凭据不保存session"""
         s = requests.Session()
         s.verify = False
         resp = s.post(f'{PRITUNL_URL}/auth/session',
             json={'username': username, 'password': password})
         data = resp.json()
         if not data.get('authenticated'):
-            return False, data.get('error_msg', '登录失败')
-        # 保存cookie
-        cookies = {}
-        for c in s.cookies:
-            cookies[c.name] = c.value
-        session['pritunl_cookies'] = cookies
-        # 获取CSRF token
-        state_resp = s.get(f'{PRITUNL_URL}/state')
-        if state_resp.status_code == 200:
-            state = state_resp.json()
-            session['pritunl_csrf'] = state.get('csrf_token', '')
-        return True, data.get('default', False)
-    
-    def _make_session(self):
+            return False, data.get('error_msg', '登录失败'), False
+        session['pritunl_user'] = username
+        session['pritunl_pass'] = password
+        tf = bool(data.get('tf_enabled')) or bool(data.get('tf_mode'))
+        return True, data.get('default', False), tf
+
+    def _get_session(self):
+        """每次请求重新登录获取新session"""
+        username = session.get('pritunl_user', '')
+        password = session.get('pritunl_pass', '')
+        if not username or not password:
+            return None, None
         s = requests.Session()
         s.verify = False
-        cookies = session.get('pritunl_cookies', {})
-        # 用cookie jar设置正确的域名和路径
-        for name, value in cookies.items():
-            s.cookies.set(name, value, domain='127.0.0.1', path='/')
-        return s
-    
+        resp = s.post(f'{PRITUNL_URL}/auth/session',
+            json={'username': username, 'password': password})
+        data = resp.json()
+        if not data.get('authenticated'):
+            return None, None
+        state_resp = s.get(f'{PRITUNL_URL}/state')
+        csrf = ''
+        if state_resp.status_code == 200:
+            csrf = state_resp.json().get('csrf_token', '')
+        return s, csrf
+
     def req(self, method, path, data=None):
-        s = self._make_session()
-        csrf = session.get('pritunl_csrf', '')
+        s, csrf = self._get_session()
+        if not s:
+            return type('obj', (object,), {'status_code': 401, 'json': lambda: {'error': 'not authenticated'}})()
         h = {'Content-Type': 'application/json', 'PR-Validated': 'true'}
         if csrf:
             h['Csrf-Token'] = csrf
         url = f'{PRITUNL_URL}{path}'
         r = s.request(method, url, headers=h, json=data)
-        # 更新cookie
-        new_cookies = dict(session.get('pritunl_cookies', {}))
-        for c in s.cookies:
-            new_cookies[c.name] = c.value
-        session['pritunl_cookies'] = new_cookies
         return r
-    
+
     def get(self, p): return self.req('GET', p)
     def post(self, p, d=None): return self.req('POST', p, d)
     def put(self, p, d=None): return self.req('PUT', p, d)
@@ -169,34 +170,101 @@ def R(tpl, **kw):
     kw['cu'] = session.get('user','')
     return render_template_string(BASE.replace('{% block c %}{% endblock %}', tpl), **kw)
 
-# ====== 登录 ======
+# ====== 登录/登出 ======
 @app.route('/login', methods=['GET','POST'])
 def login():
     if request.method == 'POST':
         d = request.get_json(silent=True) or request.form
-        ok, msg = api.login(d.get('username',''), d.get('password',''))
+        result = api.login(d.get('username',''), d.get('password',''))
+        ok, is_default, tf = result[0], result[1], result[2] if len(result)>2 else False
         if ok:
             session['user'] = d.get('username','')
-            return jsonify({'success': True})
-        return jsonify({'success': False, 'error': str(msg)}), 401
+            if is_default:
+                session['is_default'] = True
+            return jsonify({'success': True, 'default': is_default, 'tf_needed': tf})
+        return jsonify({'success': False, 'error': str(is_default)}), 401
     return '''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,sans-serif}
-.b{background:#fff;border-radius:12px;padding:36px;width:360px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,sans-serif}
+.b{background:#fff;border-radius:12px;padding:36px;width:400px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
 .b h1{text-align:center;margin-bottom:6px;font-size:22px}.b p{text-align:center;color:#999;margin-bottom:20px;font-size:13px}
 .fg{margin-bottom:14px}.fg label{display:block;margin-bottom:4px;font-weight:600;font-size:12px}
 .fg input{width:100%;padding:9px 11px;border:1px solid #d9d9d9;border-radius:6px;font-size:13px}
 .fg input:focus{outline:none;border-color:#667eea;box-shadow:0 0 0 2px rgba(102,126,234,.1)}
-.btn{width:100%;padding:11px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer}
-.btn:hover{opacity:.9}.err{color:#ff4d4f;font-size:12px;text-align:center;margin-top:10px;display:none}
-</style></head><body><div class="b"><h1>🔐 VPN管理系统</h1><p>管理员登录</p>
+.btn{width:100%;padding:11px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:8px}
+.btn:hover{opacity:.9}
+.btn-sso{background:#fff;color:#333;border:1px solid #d9d9d9;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:500;font-size:13px;padding:9px}
+.btn-sso:hover{background:#f5f5f5}
+.err{color:#ff4d4f;font-size:12px;text-align:center;margin-top:10px;display:none}
+.alert-warn{background:#fff3cd;border:1px solid #ffc107;border-radius:8px;padding:12px;margin-bottom:14px;color:#856404;font-size:12px;display:none}
+.alert-warn.show{display:block}
+.alert-warn code{background:#f8f9fa;padding:2px 6px;border-radius:4px;font-size:11px}
+.sso-divider{text-align:center;color:#999;font-size:12px;margin:12px 0;position:relative}
+.sso-divider:before,.sso-divider:after{content:'';position:absolute;top:50%;width:35%;height:1px;background:#e8e8e8}
+.sso-divider:before{left:0}.sso-divider:after{right:0}
+.tf-form{display:none}
+</style>
+</head><body>
+<div class="b">
+<h1>🔐 VPN管理系统</h1>
+<p>管理员登录</p>
+<div class="alert-warn" id="defaultAlert">
+⚠️ <b>首次登录提示</b><br>
+系统正在使用默认凭据。请在服务器上运行以下命令获取默认用户名和密码：<br>
+<code>sudo pritunl default-password</code><br>
+登录后请立即修改密码！
+</div>
+<div id="loginForm">
 <div class="fg"><label>用户名</label><input id="u" autofocus></div>
 <div class="fg"><label>密码</label><input id="p" type="password" onkeydown="if(event.key==='Enter')go()"></div>
-<button class="btn" onclick="go()">登 录</button><div class="err" id="e"></div></div>
-<script>function go(){var u=document.getElementById('u').value,p=document.getElementById('p').value;
-if(!u||!p){document.getElementById('e').textContent='请输入用户名和密码';document.getElementById('e').style.display='block';return}
+<button class="btn" onclick="go()">登 录</button>
+<div class="sso-divider">或使用SSO登录</div>
+<button class="btn btn-sso" onclick="sso('saml')">🔐 SAML登录</button>
+<button class="btn btn-sso" onclick="sso('google')">🔵 Google登录</button>
+<button class="btn btn-sso" onclick="sso('azure')">☁️ Azure登录</button>
+<button class="btn btn-sso" onclick="sso('slack')">💬 Slack登录</button>
+<button class="btn btn-sso" onclick="sso('okta')">🛡️ Okta登录</button>
+<button class="btn btn-sso" onclick="sso('onelogin')">🔑 OneLogin登录</button>
+<button class="btn btn-sso" onclick="sso('jumpcloud')">⚡ JumpCloud登录</button>
+<button class="btn btn-sso" onclick="sso('duo')">📱 Duo登录</button>
+<div class="err" id="e"></div>
+</div>
+<div id="tfForm" class="tf-form">
+<p style="text-align:center;margin-bottom:16px;color:#666;font-size:13px">请输入双因素验证码</p>
+<div class="fg"><label>验证码</label><input id="otp" autofocus onkeydown="if(event.key==='Enter')tfGo()"></div>
+<button class="btn" onclick="tfGo()">验 证</button>
+<div class="err" id="tfErr"></div>
+</div>
+</div>
+<script>
+function sso(provider){window.location.href='/sso/request?provider='+provider}
+function go(){var u=document.getElementById('u').value,p=document.getElementById('p').value;if(!u||!p){document.getElementById('e').textContent='请输入用户名和密码';document.getElementById('e').style.display='block';return}
 var x=new XMLHttpRequest();x.open('POST','/login');x.setRequestHeader('Content-Type','application/json');
-x.onload=function(){var d=JSON.parse(x.responseText);if(d.success)location.href='/';else{document.getElementById('e').textContent=d.error||'登录失败';document.getElementById('e').style.display='block'}};
-x.send(JSON.stringify({username:u,password:p}))}</script></body></html>'''
+x.onload=function(){var d=JSON.parse(x.responseText);if(d.success){if(d.default){document.getElementById('defaultAlert').classList.add('show')}if(d.tf_needed){document.getElementById('loginForm').style.display='none';document.getElementById('tfForm').style.display='block'}else{location.href='/'}}else{document.getElementById('e').textContent=d.error||'登录失败';document.getElementById('e').style.display='block'}}};
+x.send(JSON.stringify({username:u,password:p}))}
+function tfGo(){var otp=document.getElementById('otp').value;if(!otp){document.getElementById('tfErr').textContent='请输入验证码';document.getElementById('tfErr').style.display='block';return}
+var x=new XMLHttpRequest();x.open('POST','/login/tf');x.setRequestHeader('Content-Type','application/json');
+x.onload=function(){var d=JSON.parse(x.responseText);if(d.success)location.href='/';else{document.getElementById('tfErr').textContent=d.error||'验证失败';document.getElementById('tfErr').style.display='block'}}};
+x.send(JSON.stringify({code:otp}))}</script></body></html>'''
+
+@app.route('/login/tf', methods=['POST'])
+def login_tf():
+    d = request.get_json(silent=True) or request.form
+    code = d.get('code', '')
+    if not code:
+        return jsonify({'success': False, 'error': '请输入验证码'}), 400
+    s, csrf = api._get_session()
+    if not s:
+        return jsonify({'success': False, 'error': '会话已过期，请重新登录'}), 401
+    h = {'Content-Type': 'application/json', 'PR-Validated': 'true'}
+    if csrf:
+        h['Csrf-Token'] = csrf
+    resp = s.post(f'{PRITUNL_URL}/auth/session', json={'otp_code': code}, headers=h)
+    data = resp.json()
+    if data.get('authenticated'):
+        return jsonify({'success': True})
+    return jsonify({'success': False, 'error': data.get('error_msg', '验证码错误')}), 401
 
 @app.route('/logout')
 def logout():
@@ -211,792 +279,971 @@ def login_req(f):
         return f(*a, **k)
     return w
 
+# ====== SSO路由 ======
+@app.route('/sso/request')
+def sso_request():
+    provider = request.args.get('provider', '')
+    r = api.get(f'/sso/request?provider={provider}')
+    if r.status_code == 200:
+        data = r.json() if r.headers.get('content-type','').startswith('application/json') else {}
+        if 'url' in data:
+            return redirect(data['url'])
+    return redirect('/login')
+
+@app.route('/sso/callback')
+def sso_callback():
+    r = api.get(f'/sso/callback?{request.query_string.decode()}')
+    if r.status_code == 200:
+        data = r.json()
+        if data.get('authenticated'):
+            session['pritunl_user'] = data.get('username', '')
+            session['user'] = data.get('username', '')
+            return redirect('/')
+    return redirect('/login')
+
 # ====== 仪表盘 ======
 @app.route('/')
 @login_req
 def dash():
-    sv = api_get('/server')
-    org = api_get('/organization')
-    nu = 0; nr = 0
-    ss = sv if isinstance(sv, list) else []
-    for s in ss:
-        if s.get('status')=='running': nr += 1
-    for o in (org if isinstance(org, list) else []):
-        ud = api_get(f'/user/{o["id"]}')
-        if isinstance(ud, dict): nu += len(ud.get('users',[]))
-        elif isinstance(ud, list): nu += len(ud)
-    return R('''
+    servers = api_get('/server')
+    orgs = api_get('/organization')
+    total_users = 0
+    for o in orgs:
+        users = api_get(f'/user/{o["_id"]}')
+        total_users += len(users)
+    running = sum(1 for s in servers if s.get('status') == 'running')
+    tpl = '''
 <div class="stats">
-<div class="sc"><div class="n">{{ ns }}</div><div class="l">服务器</div></div>
-<div class="sc"><div class="n" style="color:#52c41a">{{ nr }}</div><div class="l">运行中</div></div>
-<div class="sc"><div class="n" style="color:#722ed1">{{ no }}</div><div class="l">组织</div></div>
-<div class="sc"><div class="n" style="color:#fa8c16">{{ nu }}</div><div class="l">用户</div></div>
+<div class="sc"><div class="n">{{ servers|length }}</div><div class="l">服务器总数</div></div>
+<div class="sc"><div class="n">{{ running }}</div><div class="l">运行中</div></div>
+<div class="sc"><div class="n">{{ orgs|length }}</div><div class="l">组织数量</div></div>
+<div class="sc"><div class="n">{{ total_users }}</div><div class="l">用户总数</div></div>
 </div>
-<div class="card"><div class="card-hd"><h2>服务器</h2><a href="/servers" class="btn btn-s">全部</a></div>
-<div class="card-bd"><table><tr><th>名称</th><th>端口</th><th>协议</th><th>状态</th><th>操作</th></tr>
-{% for s in ss %}<tr><td><b>{{ s.name }}</b></td><td>{{ s.port }}</td><td>{{ s.protocol|upper }}</td>
-<td>{% if s.status=='running'%}<span class="tag tag-g">运行中</span>{%else%}<span class="tag tag-r">已停止</span>{%endif%}</td>
-<td class="btns">{% if s.status=='running'%}
-<button class="btn btn-s btn-d" onclick="api('PUT','/api/sv/{{s._id}}/stop',null,function(){location.reload()})">停止</button>
-{%else%}<button class="btn btn-s btn-g" onclick="api('PUT','/api/sv/{{s._id}}/start',null,function(){location.reload()})">启动</button>{%endif%}</td></tr>
-{%endfor%}{%if not ss%}<tr><td colspan="5" class="empty">暂无服务器</td></tr>{%endif%}</table></div></div>
-''', p='d', ns=len(ss), nr=nr, no=len(org) if isinstance(org,list) else 0, nu=nu, ss=ss)
+<div class="card"><div class="card-hd"><h2>服务器列表</h2></div>
+<div class="card-bd"><table><tr><th>名称</th><th>端口</th><th>协议</th><th>网络</th><th>状态</th><th>操作</th></tr>
+{% for s in servers %}<tr>
+<td><b>{{ s.name }}</b></td><td>{{ s.port }}</td><td>{{ s.protocol }}</td><td>{{ s.network }}</td>
+<td><span class="tag {{'tag-g' if s.status=='running' else 'tag-r'}}">{{ '运行中' if s.status=='running' else '已停止' }}</span></td>
+<td><a href="/sv/{{ s._id }}" class="btn btn-s">详情</a></td>
+</tr>{% endfor %}
+{% if not servers %}<tr><td colspan="6" class="empty">暂无服务器</td></tr>{% endif %}
+</table></div></div>'''
+    return R(tpl, p='d', servers=servers, orgs=orgs, running=running, total_users=total_users)
 
 # ====== 服务器 ======
 @app.route('/servers')
 @login_req
 def sv_page():
-    sv = api_get('/server')
-    ss = sv if isinstance(sv, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>🖥️ 服务器管理</h2>
-<button class="btn btn-p" onclick="mo('addS')">+ 添加服务器</button></div>
-<div class="card-bd"><table><tr><th>名称</th><th>端口</th><th>协议</th><th>网络</th><th>状态</th><th>操作</th></tr>
-{%for s in ss%}<tr><td><b>{{s.name}}</b></td><td>{{s.port}}</td><td>{{s.protocol|upper}}</td><td>{{s.network}}</td>
-<td>{%if s.status=='running'%}<span class="tag tag-g">运行中</span>{%else%}<span class="tag tag-r">已停止</span>{%endif%}</td>
-<td class="btns">{%if s.status=='running'%}
-<button class="btn btn-s btn-d" onclick="api('PUT','/api/sv/{{s._id}}/stop',null,function(){location.reload()})">停止</button>
-<button class="btn btn-s" onclick="api('PUT','/api/sv/{{s._id}}/restart',null,function(){toast('已重启')})">重启</button>
-{%else%}<button class="btn btn-s btn-g" onclick="api('PUT','/api/sv/{{s._id}}/start',null,function(){location.reload()})">启动</button>{%endif%}
-<a href="/sv/{{s._id}}" class="btn btn-s">设置</a>
-<button class="btn btn-s btn-d" onclick="cd('{{s.name}}',function(){api('DELETE','/api/sv/{{s._id}}',null,function(){location.reload()})})">删除</button></td></tr>
-{%endfor%}{%if not ss%}<tr><td colspan="6" class="empty">暂无服务器</td></tr>{%endif%}</table></div></div>
-<div class="mo" id="addS"><div class="md"><div class="md-hd"><h3>添加服务器</h3><button class="md-x" onclick="mc('addS')">&times;</button></div>
-<div class="md-bd">
-<div class="fg"><label>名称</label><input id="sn" placeholder="如：公司VPN"></div>
-<div class="fg"><label>端口</label><input id="sp" type="number" value="1194"><div class="tip">每个服务器不同端口</div></div>
-<div class="fg"><label>协议</label><select id="sc"><option value="udp">UDP（推荐）</option><option value="tcp">TCP</option></select></div>
-<div class="fg"><label>虚拟网络</label><input id="snet" placeholder="留空自动生成"><div class="tip">如 10.51.0.0/24</div></div>
-<div class="fg"><label>加密算法</label><select id="scipher"><option value="aes256">AES-256（推荐）</option><option value="aes128">AES-128</option><option value="chacha20poly1205">ChaCha20</option></select></div>
-<div class="fg"><label>DNS</label><input id="sdns" value="114.114.114.114, 8.8.8.8"></div>
-</div><div class="md-ft"><button class="btn" onclick="mc('addS')">取消</button>
-<button class="btn btn-p" onclick="addS()">创建</button></div></div></div>
-<script>function addS(){var d={name:document.getElementById('sn').value,port:parseInt(document.getElementById('sp').value),protocol:document.getElementById('sc').value,dns_server:document.getElementById('sdns').value,cipher:document.getElementById('scipher').value,hash:'sha256'};
-var n=document.getElementById('snet').value;if(n)d.network=n;
-api('POST','/api/sv',d,function(r){if(r._id)location.reload();else alert('创建失败: '+JSON.stringify(r))})}</script>
-''', p='s', ss=ss)
+    servers = api_get('/server')
+    orgs = api_get('/organization')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>服务器管理</h2>
+<button class="btn btn-p" onclick="mo('mAdd')">+ 创建服务器</button></div>
+<div class="card-bd"><table><tr><th>名称</th><th>端口</th><th>协议</th><th>网络</th><th>DNS</th><th>状态</th><th>操作</th></tr>
+{% for s in servers %}<tr>
+<td><b>{{ s.name }}</b></td><td>{{ s.port }}</td><td>{{ s.protocol }}</td><td>{{ s.network }}</td><td>{{ s.dns_server or '-' }}</td>
+<td><span class="tag {{'tag-g' if s.status=='running' else 'tag-r'}}">{{ '运行中' if s.status=='running' else '已停止' }}</span></td>
+<td class="btns"><a href="/sv/{{ s._id }}" class="btn btn-s">详情</a>
+{% if s.status=='running' %}<button class="btn btn-s btn-d" onclick="svCmd('{{ s._id }}','stop')">停止</button>
+<button class="btn btn-s" onclick="svCmd('{{ s._id }}','restart')">重启</button>
+{% else %}<button class="btn btn-s btn-g" onclick="svCmd('{{ s._id }}','start')">启动</button>{% endif %}
+<button class="btn btn-s btn-d" onclick="cd('{{ s.name }}',function(){api('DELETE','/api/sv/{{ s._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button>
+</td></tr>{% endfor %}
+{% if not servers %}<tr><td colspan="7" class="empty">暂无服务器</td></tr>{% endif %}
+</table></div></div>
+<div class="mo" id="mAdd"><div class="md"><div class="md-hd"><h3>创建服务器</h3><button class="md-x" onclick="mc('mAdd')">×</button></div>
+<div class="md-bd"><div class="fg"><label>名称</label><input id="aName"></div>
+<div class="fg"><label>端口</label><input id="aPort" value="1194"></div>
+<div class="fg"><label>协议</label><select id="aProto"><option value="udp">UDP</option><option value="tcp">TCP</option></select></div>
+<div class="fg"><label>网络</label><input id="aNet" value="10.51.0.0/24"></div>
+<div class="fg"><label>DNS</label><input id="aDns" value="114.114.114.114, 8.8.8.8"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mAdd')">取消</button>
+<button class="btn btn-p" onclick="svCreate()">创建</button></div></div></div>
+<script>
+function svCmd(id,cmd){api('PUT','/api/sv/'+id+'/'+cmd,null,function(r){if(r.error)toast(r.error,'r');else{toast('操作成功');setTimeout(function(){location.reload()},500)}})}
+function svCreate(){api('POST','/api/sv',{name:document.getElementById('aName').value,port:parseInt(document.getElementById('aPort').value),protocol:document.getElementById('aProto').value,network:document.getElementById('aNet').value,dns_server:document.getElementById('aDns').value},function(r){if(r&&r._id){toast('创建成功');location.reload()}else toast('创建失败','r')})}
+</script>'''
+    return R(tpl, p='s', servers=servers, orgs=orgs)
 
 # ====== 服务器详情 ======
 @app.route('/sv/<sid>')
 @login_req
 def sv_detail(sid):
     sv = api_get(f'/server/{sid}')
-    if not sv: return redirect('/servers')
-    rt = api_get(f'/server/{sid}/route')
-    so = api_get(f'/server/{sid}/organization')
-    ao = api_get('/organization')
-    bw = api_get(f'/server/{sid}/bandwidth/1')
-    return R('''
-<div class="card"><div class="card-hd"><h2>🖥️ {{sv.name}}</h2><div class="btns">
-{%if sv.status=='running'%}<button class="btn btn-s btn-d" onclick="api('PUT','/api/sv/{{sv._id}}/stop',null,function(){location.reload()})">停止</button>
-{%else%}<button class="btn btn-s btn-g" onclick="api('PUT','/api/sv/{{sv._id}}/start',null,function(){location.reload()})">启动</button>{%endif%}
-<a href="/sv/{{sv._id}}/output" class="btn btn-s">📋 日志</a>
-<a href="/servers" class="btn btn-s">返回</a></div></div>
-<div class="card-bd"><div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-<div><h3 style="margin-bottom:10px">基本信息</h3>
-<div class="fg"><label>名称</label><input id="dn" value="{{sv.name}}"></div>
-<div class="fg"><label>端口</label><input id="dp" type="number" value="{{sv.port}}"></div>
-<div class="fg"><label>协议</label><select id="dc"><option value="udp" {{'selected' if sv.protocol=='udp'}}>UDP</option><option value="tcp" {{'selected' if sv.protocol=='tcp'}}>TCP</option></select></div>
-<div class="fg"><label>虚拟网络</label><input id="dnet" value="{{sv.network}}"></div>
-<div class="fg"><label>DNS</label><input id="ddns" value="{{sv.dns_server or '114.114.114.114, 8.8.8.8'}}"></div>
-<div class="fg"><label>Google验证器</label><select id="dotp"><option value="true" {{'selected' if sv.otp_auth}}>启用</option><option value="false" {{'selected' if not sv.otp_auth}}>禁用</option></select></div>
-<div class="fg"><label>加密算法</label><select id="dcipher">
-<option value="none" {{'selected' if sv.cipher=='none'}}>无</option>
-<option value="bf128" {{'selected' if sv.cipher=='bf128'}}>BF-128</option>
-<option value="bf256" {{'selected' if sv.cipher=='bf256'}}>BF-256</option>
+    orgs = api_get('/organization')
+    routes = api_get(f'/server/{sid}/route')
+    attached = api_get(f'/server/{sid}/organization')
+    attached_ids = [o.get('_id','') for o in attached]
+    hosts = api_get('/host')
+    bw = api_get(f'/server/{sid}/bandwidth/hour')
+    output = api_get(f'/server/{sid}/output')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ sv.name }} - 服务器详情</h2>
+<div class="btns">{% if sv.status=='running' %}
+<button class="btn btn-d" onclick="svCmd('{{ sid }}','stop')">停止</button>
+<button class="btn" onclick="svCmd('{{ sid }}','restart')">重启</button>
+{% else %}<button class="btn btn-g" onclick="svCmd('{{ sid }}','start')">启动</button>{% endif %}</div></div>
+<div class="card-bd">
+<div class="stats">
+<div class="sc"><div class="n">{{ sv.port }}</div><div class="l">端口</div></div>
+<div class="sc"><div class="n">{{ sv.protocol }}</div><div class="l">协议</div></div>
+<div class="sc"><div class="n">{{ sv.network }}</div><div class="l">网络</div></div>
+<div class="sc"><div class="n"><span class="tag {{'tag-g' if sv.status=='running' else 'tag-r'}}">{{ '运行中' if sv.status=='running' else '已停止' }}</span></div><div class="l">状态</div></div>
+</div>
+</div></div>
+
+<div class="card"><div class="card-hd"><h2>基本设置</h2></div>
+<div class="card-bd">
+<div class="fg"><label>名称</label><input id="eName" value="{{ sv.name }}"></div>
+<div class="fg"><label>端口</label><input id="ePort" value="{{ sv.port }}"></div>
+<div class="fg"><label>协议</label><select id="eProto"><option value="udp" {{'selected' if sv.protocol=='udp'}}>UDP</option><option value="tcp" {{'selected' if sv.protocol=='tcp'}}>TCP</option></select></div>
+<div class="fg"><label>网络</label><input id="eNet" value="{{ sv.network }}"></div>
+<div class="fg"><label>DNS</label><input id="eDns" value="{{ sv.dns_server or '' }}"></div>
+<div class="fg"><label>哈希算法</label><select id="eHash">
+<option value="sha1" {{'selected' if sv.hash=='sha1'}}>SHA1</option>
+<option value="sha256" {{'selected' if sv.hash=='sha256'}}>SHA256</option>
+<option value="sha512" {{'selected' if sv.hash=='sha512'}}>SHA512</option>
+</select></div>
+<div class="fg"><label>加密算法</label><select id="eCipher">
 <option value="aes128" {{'selected' if sv.cipher=='aes128'}}>AES-128</option>
 <option value="aes192" {{'selected' if sv.cipher=='aes192'}}>AES-192</option>
 <option value="aes256" {{'selected' if sv.cipher=='aes256'}}>AES-256</option>
-<option value="chacha20poly1205" {{'selected' if sv.cipher=='chacha20poly1205'}}>ChaCha20</option>
 </select></div>
-<div class="fg"><label>哈希算法</label><select id="dhash">
-<option value="sha1" {{'selected' if sv.hash=='sha1'}}>SHA1</option>
-<option value="sha256" {{'selected' if sv.hash=='sha256'}}>SHA256</option>
-<option value="sha384" {{'selected' if sv.hash=='sha384'}}>SHA384</option>
-<option value="sha512" {{'selected' if sv.hash=='sha512'}}>SHA512</option>
+<div class="fg"><label>DH参数</label><select id="eDh">
+<option value="1" {{'selected' if sv.dh_param_bits==1}}>1</option>
+<option value="2" {{'selected' if sv.dh_param_bits==2}}>2</option>
+<option value="5" {{'selected' if sv.dh_param_bits==5}}>5</option>
 </select></div>
-<div class="fg"><label>DH参数</label><select id="ddh">
-<option value="" {{'selected' if not sv.dh_param_bits}}>默认</option>
-<option value="1536" {{'selected' if sv.dh_param_bits==1536}}>1536</option>
-<option value="2048" {{'selected' if sv.dh_param_bits==2048}}>2048</option>
-<option value="4096" {{'selected' if sv.dh_param_bits==4096}}>4096</option>
+<div class="fg"><label>最大客户端</label><input id="eMax" type="number" value="{{ sv.max_clients or 200 }}"></div>
+<div class="fg"><label>虚拟网络接口</label><input id="eVnic" value="{{ sv.vnic or '' }}" placeholder="如: eth0"></div>
+<div class="fg"><label>日志级别</label><select id="eVerb">
+<option value="0" {{'selected' if sv.verb==0}}>0 - 静默</option>
+<option value="1" {{'selected' if sv.verb==1}}>1 - 致命</option>
+<option value="2" {{'selected' if sv.verb==2}}>2 - 错误</option>
+<option value="3" {{'selected' if sv.verb==3}}>3 - 警告</option>
+<option value="4" {{'selected' if sv.verb==4}}>4 - 信息</option>
+<option value="5" {{'selected' if sv.verb==5}}>5 - 调试</option>
+<option value="6" {{'selected' if sv.verb==6}}>6 - 详细</option>
 </select></div>
-<div class="fg"><label>Ping间隔(秒)</label><input id="dpinterval" type="number" value="{{sv.ping_interval or 10}}"></div>
-<div class="fg"><label>Ping超时(秒)</label><input id="dptimeout" type="number" value="{{sv.ping_timeout or 60}}"></div>
-<div class="fg"><label>会话超时(秒)</label><input id="dstimeout" type="number" value="{{sv.session_timeout or 0}}"><div class="tip">0表示不超时</div></div>
-<div class="fg"><label>最大客户端数</label><input id="dmaxclients" type="number" value="{{sv.max_clients or 0}}"><div class="tip">0表示不限制</div></div>
-<div class="fg"><label>日志详细程度</label><select id="dloglevel">
-<option value="1" {{'selected' if sv.verb==1}}>1 - 基本</option>
-<option value="2" {{'selected' if sv.verb==2}}>2 - 正常</option>
-<option value="3" {{'selected' if sv.verb==3}}>3 - 详细</option>
-<option value="4" {{'selected' if sv.verb==4}}>4 - 调试</option>
-</select></div>
-<div class="fg"><label>Inter-Client通信</label><select id="dinterop"><option value="true" {{'selected' if sv.inter_client}}>允许</option><option value="false" {{'selected' if not sv.inter_client}}>禁止</option></select></div>
-<div class="fg"><label>客户端到客户端</label><select id="dc2c"><option value="true" {{'selected' if sv.client_to_client}}>允许</option><option value="false" {{'selected' if not sv.client_to_client}}>禁止</option></select></div>
-<div class="fg"><label>绑定地址</label><input id="dbindaddr" value="{{sv.bind_address or ''}}"><div class="tip">留空则绑定所有</div></div>
-<div class="fg"><label>Network Gateway</label><input id="dngw" value="{{sv.network_gateway or ''}}"></div>
-<h3 style="margin:16px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">🔒 WireGuard配置</h3>
-<div class="fg"><label>WireGuard</label><select id="dwgen"><option value="true" {{'selected' if sv.wireguard}}>启用</option><option value="false" {{'selected' if not sv.wireguard}}>禁用</option></select></div>
-<div class="fg"><label>WG端口</label><input id="dwgport" type="number" value="{{sv.wg_port or ''}}"><div class="tip">留空自动分配</div></div>
-<div class="fg"><label>WG网络</label><input id="dwgnet" value="{{sv.wg_network or ''}}"><div class="tip">如 10.55.0.0/24，留空自动生成</div></div>
-<h3 style="margin:16px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">🛡️ 动态防火墙</h3>
-<div class="fg"><label>动态防火墙</label><select id="ddfw"><option value="true" {{'selected' if sv.dynamic_firewall}}>启用</option><option value="false" {{'selected' if not sv.dynamic_firewall}}>禁用</option></select><div class="tip">自动根据连接状态调整防火墙规则</div></div>
-<button class="btn btn-p" onclick="saveS()">保存</button></div>
-<div><h3 style="margin-bottom:10px">已绑定组织</h3>
-<table><tr><th>组织</th><th>操作</th></tr>{%for o in so%}<tr><td>{{o.name}}</td><td>
-<button class="btn btn-s btn-d" onclick="api('DELETE','/api/sv/{{sv._id}}/org/{{o._id}}',null,function(){location.reload()})">解绑</button></td></tr>
-{%endfor%}{%if not so%}<tr><td colspan="2" class="empty">未绑定</td></tr>{%endif%}</table>
-<h3 style="margin:14px 0 10px">绑定组织</h3>
-<select id="ao" style="padding:5px;border:1px solid #d9d9d9;border-radius:4px;width:180px">{%for o in ao%}<option value="{{o._id}}">{{o.name}}</option>{%endfor%}</select>
-<button class="btn btn-s btn-p" onclick="api('PUT','/api/sv/{{sv._id}}/org/'+document.getElementById('ao').value,null,function(){location.reload()})">绑定</button>
+<div class="fg"><label>Keepalive间隔(秒)</label><input id="eKa1" type="number" value="{{ sv.keepalive_interval or 10 }}"></div>
+<div class="fg"><label>Keepalive超时(秒)</label><input id="eKa2" type="number" value="{{ sv.keepalive_timeout or 60 }}"></div>
+<div class="fg"><label>MTU</label><input id="eMtu" type="number" value="{{ sv.mtu or 1500 }}"></div>
+<div class="fg"><label>Txqueuelen</label><input id="eTxq" type="number" value="{{ sv.txqueuelen or 1000 }}"></div>
+<div class="fg"><label>ping间隔(秒)</label><input id="ePing1" type="number" value="{{ sv.ping_interval or 10 }}"></div>
+<div class="fg"><label>ping超时(秒)</label><input id="ePing2" type="number" value="{{ sv.ping_timeout or 60 }}"></div>
+<button class="btn btn-p" onclick="svSave()">保存设置</button>
 </div></div>
-<h3 style="margin:16px 0 10px">路由</h3>
-<table><tr><th>网络</th><th>NAT</th><th>操作</th></tr>{%for r in rt%}<tr><td>{{r.network}}</td><td>{{'是' if r.nat else '否'}}</td>
-<td><button class="btn btn-s btn-d" onclick="api('DELETE','/api/sv/{{sv._id}}/rt/{{r.network}}',null,function(){location.reload()})">删除</button></td></tr>
-{%endfor%}{%if not rt%}<tr><td colspan="3" class="empty">暂无路由</td></tr>{%endif%}</table>
-<div style="margin-top:10px;display:flex;gap:6px"><input id="nr" placeholder="如: 192.168.33.0/24" style="padding:5px;border:1px solid #d9d9d9;border-radius:4px;width:220px">
-<button class="btn btn-s btn-p" onclick="api('POST','/api/sv/{{sv._id}}/rt',{network:document.getElementById('nr').value,nat:true},function(){location.reload()})">添加</button></div>
-<h3 style="margin:16px 0 10px">📊 带宽监控</h3>
-<div style="margin-bottom:8px"><select id="bwperiod" onchange="loadBW()" style="padding:5px;border:1px solid #d9d9d9;border-radius:4px">
-<option value="1">最近1小时</option><option value="6">最近6小时</option><option value="24">最近24小时</option><option value="168">最近7天</option></select></div>
-<div id="bwinfo" style="font-size:12px;color:#666">
-{%if bw and bw is mapping%}
-<table><tr><th>指标</th><th>数值</th></tr>
-{%for k,v in bw.items()%}<tr><td>{{k}}</td><td>{{v}}</td></tr>{%endfor%}</table>
-{%elif bw and bw is sequence%}
-<table><tr><th>时间</th><th>接收</th><th>发送</th></tr>
-{%for b in bw[-20:]%}<tr><td>{{b.get('timestamp','')}}</td><td>{{b.get('bytes_recv','')}}</td><td>{{b.get('bytes_sent','')}}</td></tr>{%endfor%}</table>
-{%else%}<p>暂无带宽数据</p>{%endif%}</div>
+
+<div class="card"><div class="card-hd"><h2>WireGuard设置</h2></div>
+<div class="card-bd">
+<div class="fg"><label>启用WireGuard</label><select id="eWg"><option value="false" {{'selected' if not sv.wg}}>否</option><option value="true" {{'selected' if sv.wg}}>是</option></select></div>
+<div class="fg"><label>WireGuard端口</label><input id="eWgPort" type="number" value="{{ sv.wg_port or '' }}" placeholder="自动"></div>
+<div class="fg"><label>WireGuard网络</label><input id="eWgNet" value="{{ sv.wg_network or '' }}" placeholder="如: 10.52.0.0/24"></div>
+<button class="btn btn-p" onclick="svSaveWg()">保存WireGuard</button>
 </div></div>
-<script>function loadBW(){var p=document.getElementById('bwperiod').value;api('GET','/api/sv/{{sv._id}}/bw/'+p,null,function(r){var el=document.getElementById('bwinfo');if(!r||(!Array.isArray(r)&&typeof r!=='object')){el.innerHTML='<p>暂无数据</p>';return}if(Array.isArray(r)){var h='<table><tr><th>时间</th><th>接收</th><th>发送</th></tr>';r.slice(-20).forEach(function(b){h+='<tr><td>'+(b.timestamp||'')+'</td><td>'+(b.bytes_recv||0)+'</td><td>'+(b.bytes_sent||0)+'</td></tr>'});h+='</table>';el.innerHTML=h}else{var h='<table><tr><th>指标</th><th>数值</th></tr>';for(var k in r)h+='<tr><td>'+k+'</td><td>'+r[k]+'</td></tr>';h+='</table>';el.innerHTML=h}})}
-function saveS(){var dhv=document.getElementById('ddh').value;var d={name:document.getElementById('dn').value,port:parseInt(document.getElementById('dp').value),protocol:document.getElementById('dc').value,network:document.getElementById('dnet').value,dns_server:document.getElementById('ddns').value,otp_auth:document.getElementById('dotp').value==='true',cipher:document.getElementById('dcipher').value,hash:document.getElementById('dhash').value,ping_interval:parseInt(document.getElementById('dpinterval').value),ping_timeout:parseInt(document.getElementById('dptimeout').value),session_timeout:parseInt(document.getElementById('dstimeout').value),max_clients:parseInt(document.getElementById('dmaxclients').value),verb:parseInt(document.getElementById('dloglevel').value),inter_client:document.getElementById('dinterop').value==='true',client_to_client:document.getElementById('dc2c').value==='true',bind_address:document.getElementById('dbindaddr').value||null,network_gateway:document.getElementById('dngw').value||null,wireguard:document.getElementById('dwgen').value==='true',dynamic_firewall:document.getElementById('ddfw').value==='true'};if(dhv)d.dh_param_bits=parseInt(dhv);var wgport=document.getElementById('dwgport').value;if(wgport)d.wg_port=parseInt(wgport);var wgnet=document.getElementById('dwgnet').value;if(wgnet)d.wg_network=wgnet;api('PUT','/api/sv/{{sv._id}}',d,function(){toast('已保存')})}</script>
-''', p='s', sv=sv, rt=rt if isinstance(rt,list) else [], so=so if isinstance(so,list) else [], ao=ao if isinstance(ao,list) else [], bw=bw)
+
+<div class="card"><div class="card-hd"><h2>动态防火墙</h2></div>
+<div class="card-bd">
+<div class="fg"><label>启用动态防火墙</label><select id="eDf"><option value="false" {{'selected' if not sv.dynamic_firewall}}>否</option><option value="true" {{'selected' if sv.dynamic_firewall}}>是</option></select></div>
+<button class="btn btn-p" onclick="svSaveDf()">保存防火墙</button>
+</div></div>
+
+<div class="card"><div class="card-hd"><h2>路由管理</h2>
+<button class="btn btn-p" onclick="mo('mRt')">+ 添加路由</button></div>
+<div class="card-bd"><table><tr><th>网络</th><th>注释</th><th>操作</th></tr>
+{% for r in routes %}<tr><td>{{ r.network }}</td><td>{{ r.comment or '-' }}</td>
+<td><button class="btn btn-s btn-d" onclick="cd('{{ r.network }}',function(){api('DELETE','/api/sv/{{ sid }}/rt/{{ r.network }}',null,function(x){if(x.error)toast(x.error,'r');else location.reload()})})">删除</button></td></tr>
+{% endfor %}{% if not routes %}<tr><td colspan="3" class="empty">暂无路由</td></tr>{% endif %}
+</table></div></div>
+
+<div class="card"><div class="card-hd"><h2>关联组织</h2></div>
+<div class="card-bd"><table><tr><th>组织</th><th>状态</th><th>操作</th></tr>
+{% for o in orgs %}<tr><td>{{ o.name }}</td>
+<td>{% if o._id in attached_ids %}<span class="tag tag-g">已关联</span>{% else %}<span class="tag tag-gray">未关联</span>{% endif %}</td>
+<td>{% if o._id in attached_ids %}
+<button class="btn btn-s btn-d" onclick="api('DELETE','/api/sv/{{ sid }}/org/{{ o._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">解除关联</button>
+{% else %}
+<button class="btn btn-s btn-g" onclick="api('PUT','/api/sv/{{ sid }}/org/{{ o._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">关联</button>
+{% endif %}</td></tr>{% endfor %}
+</table></div></div>
+
+<div class="card"><div class="card-hd"><h2>带宽监控</h2></div>
+<div class="card-bd"><table><tr><th>时间</th><th>入站</th><th>出站</th></tr>
+{% for b in bw[:10] %}<tr><td>{{ b.timestamp }}</td><td>{{ b.bytes_recv }}</td><td>{{ b.bytes_sent }}</td></tr>
+{% endfor %}{% if not bw %}<tr><td colspan="3" class="empty">暂无数据</td></tr>{% endif %}
+</table></div></div>
+
+<div class="card"><div class="card-hd"><h2>服务器日志</h2>
+<button class="btn" onclick="api('DELETE','/api/sv/{{ sid }}/output',null,function(){location.reload()})">清空日志</button></div>
+<div class="card-bd"><pre style="max-height:400px;overflow:auto;font-size:12px;background:#f8f9fa;padding:12px;border-radius:4px">{{ output|join('\\n') if output else '暂无日志' }}</pre></div></div>
+
+<div class="mo" id="mRt"><div class="md"><div class="md-hd"><h3>添加路由</h3><button class="md-x" onclick="mc('mRt')">×</button></div>
+<div class="md-bd"><div class="fg"><label>网络</label><input id="rNet" placeholder="如: 192.168.1.0/24"></div>
+<div class="fg"><label>注释</label><input id="rComment"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mRt')">取消</button>
+<button class="btn btn-p" onclick="api('POST','/api/sv/{{ sid }}/rt',{network:document.getElementById('rNet').value,comment:document.getElementById('rComment').value},function(r){if(r.error)toast(r.error,'r');else{mc('mRt');location.reload()}})">添加</button></div></div></div>
+<script>
+function svCmd(id,cmd){api('PUT','/api/sv/'+id+'/'+cmd,null,function(r){if(r.error)toast(r.error,'r');else{toast('操作成功');setTimeout(function(){location.reload()},500)}})}
+function svSave(){api('PUT','/api/sv/{{ sid }}',{name:document.getElementById('eName').value,port:parseInt(document.getElementById('ePort').value),protocol:document.getElementById('eProto').value,network:document.getElementById('eNet').value,dns_server:document.getElementById('eDns').value,hash:document.getElementById('eHash').value,cipher:document.getElementById('eCipher').value,dh_param_bits:parseInt(document.getElementById('eDh').value),max_clients:parseInt(document.getElementById('eMax').value),vnic:document.getElementById('eVnic').value||null,verb:parseInt(document.getElementById('eVerb').value),keepalive_interval:parseInt(document.getElementById('eKa1').value),keepalive_timeout:parseInt(document.getElementById('eKa2').value),mtu:parseInt(document.getElementById('eMtu').value),txqueuelen:parseInt(document.getElementById('eTxq').value),ping_interval:parseInt(document.getElementById('ePing1').value),ping_timeout:parseInt(document.getElementById('ePing2').value)},function(r){if(r.error)toast(r.error,'r');else toast('保存成功')})}
+function svSaveWg(){api('PUT','/api/sv/{{ sid }}',{wg:document.getElementById('eWg').value=='true',wg_port:parseInt(document.getElementById('eWgPort').value)||null,wg_network:document.getElementById('eWgNet').value||null},function(r){if(r.error)toast(r.error,'r');else toast('保存成功')})}
+function svSaveDf(){api('PUT','/api/sv/{{ sid }}',{dynamic_firewall:document.getElementById('eDf').value=='true'},function(r){if(r.error)toast(r.error,'r');else toast('保存成功')})}
+</script>'''
+    return R(tpl, p='s', sid=sid, sv=sv, orgs=orgs, routes=routes, attached_ids=attached_ids, hosts=hosts, bw=bw, output=output)
 
 # ====== 组织 ======
 @app.route('/orgs')
 @login_req
 def orgs_page():
-    org = api_get('/organization')
-    ol = org if isinstance(org, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>🏢 组织管理</h2>
-<button class="btn btn-p" onclick="mo('addO')">+ 添加组织</button></div>
-<div class="card-bd"><table><tr><th>名称</th><th>操作</th></tr>
-{%for o in ol%}<tr><td><b>{{o.name}}</b></td><td class="btns">
-<a href="/org/{{o._id}}" class="btn btn-s">用户</a>
-<button class="btn btn-s btn-d" onclick="cd('{{o.name}}',function(){api('DELETE','/api/org/{{o._id}}',null,function(){location.reload()})})">删除</button></td></tr>
-{%endfor%}{%if not ol%}<tr><td colspan="2" class="empty">暂无组织</td></tr>{%endif%}</table></div></div>
-<div class="mo" id="addO"><div class="md"><div class="md-hd"><h3>添加组织</h3><button class="md-x" onclick="mc('addO')">&times;</button></div>
-<div class="md-bd"><div class="fg"><label>名称</label><input id="on" placeholder="如：技术部"></div></div>
-<div class="md-ft"><button class="btn" onclick="mc('addO')">取消</button>
-<button class="btn btn-p" onclick="api('POST','/api/org',{name:document.getElementById('on').value},function(r){if(r._id)location.reload();else alert('失败')})">创建</button></div></div></div>
-''', p='o', ol=ol)
+    orgs = api_get('/organization')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>组织管理</h2>
+<button class="btn btn-p" onclick="mo('mOrg')">+ 创建组织</button></div>
+<div class="card-bd"><table><tr><th>名称</th><th>用户数</th><th>操作</th></tr>
+{% for o in orgs %}<tr>
+<td><a href="/org/{{ o._id }}"><b>{{ o.name }}</b></a></td>
+<td>{{ o.user_count or '-' }}</td>
+<td class="btns"><a href="/org/{{ o._id }}" class="btn btn-s">用户</a>
+<a href="/org/{{ o._id }}/bulk" class="btn btn-s">批量添加</a>
+<a href="/org/{{ o._id }}/email" class="btn btn-s">发邮件</a>
+<button class="btn btn-s btn-d" onclick="cd('{{ o.name }}',function(){api('DELETE','/api/org/{{ o._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+</tr>{% endfor %}
+{% if not orgs %}<tr><td colspan="3" class="empty">暂无组织</td></tr>{% endif %}
+</table></div></div>
+<div class="mo" id="mOrg"><div class="md"><div class="md-hd"><h3>创建组织</h3><button class="md-x" onclick="mc('mOrg')">×</button></div>
+<div class="md-bd"><div class="fg"><label>名称</label><input id="oName"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mOrg')">取消</button>
+<button class="btn btn-p" onclick="api('POST','/api/org',{name:document.getElementById('oName').value},function(r){if(r&&r._id){toast('创建成功');location.reload()}else toast('创建失败','r')})">创建</button></div></div></div>'''
+    return R(tpl, p='o', orgs=orgs)
 
 # ====== 组织用户 ======
 @app.route('/org/<oid>')
 @login_req
 def org_users(oid):
     org = api_get(f'/organization/{oid}')
-    ud = api_get(f'/user/{oid}')
-    ul = ud.get('users',ud) if isinstance(ud,dict) else (ud if isinstance(ud,list) else [])
-    return R('''
-<div class="card"><div class="card-hd"><h2>👥 {{org.name}} - 用户</h2><div class="btns">
-<button class="btn btn-p" onclick="mo('addU')">+ 添加用户</button>
-<a href="/org/{{oid}}/bulk" class="btn">📋 批量添加</a>
-<a href="/org/{{oid}}/email" class="btn">📧 发送邮件</a>
-<a href="/orgs" class="btn btn-s">返回</a></div></div>
-<div class="card-bd"><table><tr><th>用户名</th><th>邮箱</th><th>状态</th><th>分组</th><th>操作</th></tr>
-{%for u in ul%}<tr><td><b>{{u.name}}</b></td><td>{{u.email or '-'}}</td>
-<td>{%if u.disabled%}<span class="tag tag-gray">禁用</span>{%else%}<span class="tag tag-g">启用</span>{%endif%}</td>
-<td>{{(u.groups|join(', ')) if u.groups else '-'}}</td>
-<td class="btns"><a href="/usr/{{oid}}/{{u._id}}" class="btn btn-s">详情</a>
-<a href="/data/{{oid}}/{{u._id}}.tar" class="btn btn-s">下载配置</a>
-<button class="btn btn-s" onclick="api('PUT','/api/usr/{{oid}}/{{u._id}}',{disabled:{{'false' if u.disabled else 'true'}}},function(){location.reload()})">{{'启用' if u.disabled else '禁用'}}</button>
-<button class="btn btn-s btn-d" onclick="cd('{{u.name}}',function(){api('DELETE','/api/usr/{{oid}}/{{u._id}}',null,function(){location.reload()})})">删除</button></td></tr>
-{%endfor%}{%if not ul%}<tr><td colspan="5" class="empty">暂无用户</td></tr>{%endif%}</table></div></div>
-<div class="mo" id="addU"><div class="md"><div class="md-hd"><h3>添加用户</h3><button class="md-x" onclick="mc('addU')">&times;</button></div>
-<div class="md-bd">
-<div class="fg"><label>用户名</label><input id="un" placeholder="如：zhangsan"></div>
-<div class="fg"><label>邮箱</label><input id="ue" placeholder="选填"></div>
-<div class="fg"><label>PIN码</label><input id="up" placeholder="选填，连接时需要"></div>
-<div class="fg"><label>分组</label><input id="ug" placeholder="多个逗号分隔"><div class="tip">用于服务器访问控制</div></div>
-</div><div class="md-ft"><button class="btn" onclick="mc('addU')">取消</button>
-<button class="btn btn-p" onclick="addU()">创建</button></div></div></div>
-<script>function addU(){var d={name:document.getElementById('un').value};
-var e=document.getElementById('ue').value;if(e)d.email=e;
-var p=document.getElementById('up').value;if(p)d.pin=p;
-var g=document.getElementById('ug').value;if(g)d.groups=g.split(',').map(function(x){return x.trim()});
-api('POST','/api/usr/{{oid}}',d,function(r){if(r&&r.name)location.reload();else alert('失败')})}</script>
-''', p='u', org=org, ul=ul, oid=oid)
+    users = api_get(f'/user/{oid}')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ org.name }} - 用户管理</h2>
+<div class="btns"><a href="/org/{{ oid }}/bulk" class="btn">批量添加</a>
+<a href="/org/{{ oid }}/email" class="btn">发邮件</a>
+<button class="btn btn-p" onclick="mo('mUsr')">+ 添加用户</button></div></div>
+<div class="card-bd"><table><tr><th>用户名</th><th>邮箱</th><th>状态</th><th>操作</th></tr>
+{% for u in users %}<tr>
+<td><a href="/usr/{{ oid }}/{{ u._id }}"><b>{{ u.name }}</b></a></td>
+<td>{{ u.email or '-' }}</td>
+<td><span class="tag {{'tag-g' if not u.disabled else 'tag-r'}}">{{ '正常' if not u.disabled else '已禁用' }}</span></td>
+<td class="btns"><a href="/usr/{{ oid }}/{{ u._id }}" class="btn btn-s">详情</a>
+<button class="btn btn-s {{'tag-r' if not u.disabled else 'tag-g'}}" onclick="api('PUT','/api/usr/{{ oid }}/{{ u._id }}',{disabled:{{ 'true' if not u.disabled else 'false' }}},function(r){if(r.error)toast(r.error,'r');else location.reload()})">{{ '禁用' if not u.disabled else '启用' }}</button>
+<button class="btn btn-s btn-d" onclick="cd('{{ u.name }}',function(){api('DELETE','/api/usr/{{ oid }}/{{ u._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+</tr>{% endfor %}
+{% if not users %}<tr><td colspan="4" class="empty">暂无用户</td></tr>{% endif %}
+</table></div></div>
+<div class="mo" id="mUsr"><div class="md"><div class="md-hd"><h3>添加用户</h3><button class="md-x" onclick="mc('mUsr')">×</button></div>
+<div class="md-bd"><div class="fg"><label>用户名</label><input id="uName"></div>
+<div class="fg"><label>邮箱</label><input id="uEmail"></div>
+<div class="fg"><label>PIN</label><input id="uPin" placeholder="可选"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mUsr')">取消</button>
+<button class="btn btn-p" onclick="api('POST','/api/usr/{{ oid }}',{name:document.getElementById('uName').value,email:document.getElementById('uEmail').value,pin:document.getElementById('uPin').value||null},function(r){if(r&&r._id){toast('添加成功');location.reload()}else toast('添加失败','r')})">添加</button></div></div></div>'''
+    return R(tpl, p='o', oid=oid, org=org, users=users)
 
-# ====== 全部用户 ======
+# ====== 用户列表 ======
 @app.route('/users')
 @login_req
 def users_all():
-    org = api_get('/organization')
-    all_u = []
-    for o in (org if isinstance(org,list) else []):
-        ud = api_get(f'/user/{o["id"]}')
-        ul = ud.get('users',ud) if isinstance(ud,dict) else (ud if isinstance(ud,list) else [])
-        for u in ul:
-            u['_oid'] = o['id']; u['_on'] = o['name']
-            all_u.append(u)
-    return R('''
-<div class="card"><div class="card-hd"><h2>👥 全部用户</h2></div>
+    orgs = api_get('/organization')
+    all_users = []
+    for o in orgs:
+        users = api_get(f'/user/{o["_id"]}')
+        for u in users:
+            u['_org_name'] = o.get('name','')
+            u['_org_id'] = o['_id']
+            all_users.append(u)
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>全部用户</h2></div>
 <div class="card-bd"><table><tr><th>用户名</th><th>组织</th><th>邮箱</th><th>状态</th><th>操作</th></tr>
-{%for u in ul%}<tr><td><b>{{u.name}}</b></td><td>{{u._on}}</td><td>{{u.email or '-'}}</td>
-<td>{%if u.disabled%}<span class="tag tag-gray">禁用</span>{%else%}<span class="tag tag-g">启用</span>{%endif%}</td>
-<td class="btns"><a href="/usr/{{u._oid}}/{{u._id}}" class="btn btn-s">详情</a>
-<a href="/data/{{u._oid}}/{{u._id}}.tar" class="btn btn-s">下载配置</a>
-<button class="btn btn-s btn-d" onclick="cd('{{u.name}}',function(){api('DELETE','/api/usr/{{u._oid}}/{{u._id}}',null,function(){location.reload()})})">删除</button></td></tr>
-{%endfor%}{%if not ul%}<tr><td colspan="5" class="empty">暂无用户</td></tr>{%endif%}</table></div></div>
-''', p='u', ul=all_u)
-
-# ====== 设置 ======
-@app.route('/settings')
-@login_req
-def settings_page():
-    cfg = api_get('/settings')
-    return R('''
-<div class="card"><div class="card-hd"><h2>⚙️ 设置</h2></div><div class="card-bd">
-<div style="display:flex;gap:10px;margin-bottom:16px">
-<a href="/logs" class="btn btn-s">📋 系统日志</a>
-<a href="/audit" class="btn btn-s">🔍 审计日志</a>
-</div>
-<div class="fg"><label>SSO认证</label><select id="sso"><option value="true" {{'selected' if cfg and cfg.sso}}>启用</option><option value="false" {{'selected' if not cfg or not cfg.sso}}>禁用</option></select></div>
-<div class="fg"><label>域名</label><input id="sdomain" value="{{cfg.server_domain if cfg and cfg.server_domain else ''}}"><div class="tip">用于生成客户端配置URL</div></div>
-<div class="fg"><label>邮件服务器(SMTP)</label><input id="ssmtp" value="{{cfg.email_smtp_server if cfg and cfg.email_smtp_server else ''}}"></div>
-<div class="fg"><label>SMTP端口</label><input id="ssmtpport" type="number" value="{{cfg.email_smtp_port if cfg and cfg.email_smtp_port else 587}}"></div>
-<div class="fg"><label>SMTP用户名</label><input id="ssmtpuser" value="{{cfg.email_smtp_username if cfg and cfg.email_smtp_username else ''}}"></div>
-<div class="fg"><label>SMTP密码</label><input id="ssmtppass" type="password" value="{{cfg.email_smtp_password if cfg and cfg.email_smtp_password else ''}}"></div>
-<div class="fg"><label>发件人地址</label><input id="sfrom" value="{{cfg.email_from if cfg and cfg.email_from else ''}}"></div>
-<button class="btn btn-p" onclick="saveCfg()">保存设置</button>
-</div></div>
-<div class="card"><div class="card-hd"><h2>🔒 Let\'s Encrypt SSL证书</h2></div><div class="card-bd">
-<div class="fg"><label>域名</label><input id="ledomain" value="{{cfg.lets_encrypt_domain if cfg and cfg.lets_encrypt_domain else ''}}"><div class="tip">用于自动申请SSL证书，如 vpn.example.com</div></div>
-<button class="btn btn-p" onclick="saveLE()">保存</button>
-</div></div>
-<div class="card"><div class="card-hd"><h2>🔑 单点登录(SSO)配置</h2></div><div class="card-bd">
-<h3 style="margin-bottom:10px">SAML</h3>
-<div class="fg"><label>SAML SSO URL</label><input id="saml_sso_url" value="{{cfg.saml_sso_url if cfg and cfg.saml_sso_url else ''}}"></div>
-<div class="fg"><label>SAML Issuer URL</label><input id="saml_issuer_url" value="{{cfg.saml_issuer_url if cfg and cfg.saml_issuer_url else ''}}"></div>
-<div class="fg"><label>SAML Certificate (Base64)</label><textarea id="saml_cert" rows="3">{{cfg.saml_cert if cfg and cfg.saml_cert else ''}}</textarea></div>
-<div class="fg"><label>SAML Audience URL</label><input id="saml_audience_url" value="{{cfg.saml_audience_url if cfg and cfg.saml_audience_url else ''}}"></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">Google Workspace</h3>
-<div class="fg"><label>Google Client ID</label><input id="google_client_id" value="{{cfg.google_client_id if cfg and cfg.google_client_id else ''}}"></div>
-<div class="fg"><label>Google Client Secret</label><input id="google_client_secret" type="password" value="{{cfg.google_client_secret if cfg and cfg.google_client_secret else ''}}"></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">Azure AD</h3>
-<div class="fg"><label>Azure Client ID</label><input id="azure_client_id" value="{{cfg.azure_client_id if cfg and cfg.azure_client_id else ''}}"></div>
-<div class="fg"><label>Azure Client Secret</label><input id="azure_client_secret" type="password" value="{{cfg.azure_client_secret if cfg and cfg.azure_client_secret else ''}}"></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">OneLogin</h3>
-<div class="fg"><label>OneLogin Client ID</label><input id="onelogin_client_id" value="{{cfg.onelogin_client_id if cfg and cfg.onelogin_client_id else ''}}"></div>
-<div class="fg"><label>OneLogin Client Secret</label><input id="onelogin_client_secret" type="password" value="{{cfg.onelogin_client_secret if cfg and cfg.onelogin_client_secret else ''}}"></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">Okta</h3>
-<div class="fg"><label>Okta Client ID</label><input id="okta_client_id" value="{{cfg.okta_client_id if cfg and cfg.okta_client_id else ''}}"></div>
-<div class="fg"><label>Okta Client Secret</label><input id="okta_client_secret" type="password" value="{{cfg.okta_client_secret if cfg and cfg.okta_client_secret else ''}}"></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">Duo</h3>
-<div class="fg"><label>Duo Integration Key</label><input id="duo_ikey" value="{{cfg.duo_ikey if cfg and cfg.duo_ikey else ''}}"></div>
-<div class="fg"><label>Duo Secret Key</label><input id="duo_skey" type="password" value="{{cfg.duo_skey if cfg and cfg.duo_skey else ''}}"></div>
-<div class="fg"><label>Duo API Hostname</label><input id="duo_host" value="{{cfg.duo_host if cfg and cfg.duo_host else ''}}"></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">JumpCloud</h3>
-<div class="fg"><label>JumpCloud Client ID</label><input id="jumpcloud_client_id" value="{{cfg.jumpcloud_client_id if cfg and cfg.jumpcloud_client_id else ''}}"></div>
-<div class="fg"><label>JumpCloud Client Secret</label><input id="jumpcloud_client_secret" type="password" value="{{cfg.jumpcloud_client_secret if cfg and cfg.jumpcloud_client_secret else ''}}"></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">Radius</h3>
-<div class="fg"><label>Radius Server</label><input id="radius_server" value="{{cfg.radius_server if cfg and cfg.radius_server else ''}}"></div>
-<div class="fg"><label>Radius Secret</label><input id="radius_secret" type="password" value="{{cfg.radius_secret if cfg and cfg.radius_secret else ''}}"></div>
-<button class="btn btn-p" onclick="saveSSO()">保存SSO配置</button>
-</div></div>
-<script>function saveCfg(){api('PUT','/api/settings',{sso:document.getElementById('sso').value==='true',server_domain:document.getElementById('sdomain').value,email_smtp_server:document.getElementById('ssmtp').value,email_smtp_port:parseInt(document.getElementById('ssmtpport').value)||587,email_smtp_username:document.getElementById('ssmtpuser').value,email_smtp_password:document.getElementById('ssmtppass').value,email_from:document.getElementById('sfrom').value},function(r){if(r)toast('已保存');else toast('保存失败','r')})}
-function saveLE(){api('PUT','/api/settings',{lets_encrypt_domain:document.getElementById('ledomain').value},function(r){if(r)toast('已保存');else toast('保存失败','r')})}
-function saveSSO(){var d={saml_sso_url:document.getElementById('saml_sso_url').value,saml_issuer_url:document.getElementById('saml_issuer_url').value,saml_cert:document.getElementById('saml_cert').value,saml_audience_url:document.getElementById('saml_audience_url').value,google_client_id:document.getElementById('google_client_id').value,google_client_secret:document.getElementById('google_client_secret').value,azure_client_id:document.getElementById('azure_client_id').value,azure_client_secret:document.getElementById('azure_client_secret').value,onelogin_client_id:document.getElementById('onelogin_client_id').value,onelogin_client_secret:document.getElementById('onelogin_client_secret').value,okta_client_id:document.getElementById('okta_client_id').value,okta_client_secret:document.getElementById('okta_client_secret').value,duo_ikey:document.getElementById('duo_ikey').value,duo_skey:document.getElementById('duo_skey').value,duo_host:document.getElementById('duo_host').value,jumpcloud_client_id:document.getElementById('jumpcloud_client_id').value,jumpcloud_client_secret:document.getElementById('jumpcloud_client_secret').value,radius_server:document.getElementById('radius_server').value,radius_secret:document.getElementById('radius_secret').value};api('PUT','/api/settings',d,function(r){if(r)toast('SSO配置已保存');else toast('保存失败','r')})}</script>
-''', p='cfg', cfg=cfg)
-
-# ====== API代理 ======
-@app.route('/api/org', methods=['POST'])
-@login_req
-def api_org_c():
-    r = api.post('/organization', request.json)
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/org/<oid>', methods=['DELETE'])
-@login_req
-def api_org_d(oid):
-    return jsonify({'ok': api.delete(f'/organization/{oid}').status_code==200})
-
-@app.route('/api/usr/<oid>', methods=['POST'])
-@login_req
-def api_usr_c(oid):
-    r = api.post(f'/user/{oid}', request.json)
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/usr/<oid>/<uid>', methods=['PUT'])
-@login_req
-def api_usr_u(oid, uid):
-    r = api.put(f'/user/{oid}/{uid}', request.json)
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/usr/<oid>/<uid>', methods=['DELETE'])
-@login_req
-def api_usr_d(oid, uid):
-    return jsonify({'ok': api.delete(f'/user/{oid}/{uid}').status_code==200})
-
-@app.route('/api/sv', methods=['POST'])
-@login_req
-def api_sv_c():
-    r = api.post('/server', request.json)
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/sv/<sid>', methods=['PUT'])
-@login_req
-def api_sv_u(sid):
-    r = api.put(f'/server/{sid}', request.json)
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/sv/<sid>', methods=['DELETE'])
-@login_req
-def api_sv_d(sid):
-    return jsonify({'ok': api.delete(f'/server/{sid}').status_code==200})
-
-@app.route('/api/sv/<sid>/start', methods=['PUT'])
-@login_req
-def api_sv_start(sid):
-    r = api.put(f'/server/{sid}/start')
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/sv/<sid>/stop', methods=['PUT'])
-@login_req
-def api_sv_stop(sid):
-    r = api.put(f'/server/{sid}/stop')
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/sv/<sid>/restart', methods=['PUT'])
-@login_req
-def api_sv_restart(sid):
-    r = api.put(f'/server/{sid}/restart')
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/sv/<sid>/rt', methods=['POST'])
-@login_req
-def api_rt_c(sid):
-    r = api.post(f'/server/{sid}/route', request.json)
-    return r.json() if r.status_code==200 else jsonify({'error':r.text}), r.status_code
-
-@app.route('/api/sv/<sid>/rt/<path:net>', methods=['DELETE'])
-@login_req
-def api_rt_d(sid, net):
-    return jsonify({'ok': api.delete(f'/server/{sid}/route/{net}').status_code==200})
-
-@app.route('/api/sv/<sid>/org/<oid>', methods=['PUT'])
-@login_req
-def api_org_attach(sid, oid):
-    return jsonify({'ok': api.put(f'/server/{sid}/organization/{oid}').status_code==200})
-
-@app.route('/api/sv/<sid>/org/<oid>', methods=['DELETE'])
-@login_req
-def api_org_detach(sid, oid):
-    return jsonify({'ok': api.delete(f'/server/{sid}/organization/{oid}').status_code==200})
-
-@app.route('/data/<oid>/<uid>.tar')
-@login_req
-def dl_profile(oid, uid):
-    r = api.get(f'/data/{oid}/{uid}.tar')
-    if r.status_code == 200:
-        return send_file(io.BytesIO(r.content), mimetype='application/octet-stream', as_attachment=True, download_name=f'{uid}.tar')
-    return '下载失败', 400
-
-# ====== 管理员管理 ======
-@app.route('/admins')
-@login_req
-def admins_page():
-    ad = api_get('/administrators')
-    al = ad if isinstance(ad, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>👤 管理员管理</h2>
-<button class="btn btn-p" onclick="mo('addA')">+ 添加管理员</button></div>
-<div class="card-bd"><table><tr><th>用户名</th><th>操作</th></tr>
-{%for a in al%}<tr><td><b>{{a.username}}</b></td><td class="btns">
-<button class="btn btn-s btn-d" onclick="cd('{{a.username}}',function(){api('DELETE','/api/admin/{{a._id}}',null,function(){location.reload()})})">删除</button></td></tr>
-{%endfor%}{%if not al%}<tr><td colspan="2" class="empty">暂无管理员</td></tr>{%endif%}</table></div></div>
-<div class="mo" id="addA"><div class="md"><div class="md-hd"><h3>添加管理员</h3><button class="md-x" onclick="mc('addA')">&times;</button></div>
-<div class="md-bd">
-<div class="fg"><label>用户名</label><input id="aun"></div>
-<div class="fg"><label>密码</label><input id="apw" type="password"></div>
-<div class="fg"><label>Secret</label><input id="asec"><div class="tip">管理员密钥，可留空</div></div>
-</div><div class="md-ft"><button class="btn" onclick="mc('addA')">取消</button>
-<button class="btn btn-p" onclick="addA()">创建</button></div></div></div>
-<script>function addA(){var d={username:document.getElementById('aun').value,password:document.getElementById('apw').value};var s=document.getElementById('asec').value;if(s)d.secret=s;api('POST','/api/admin',d,function(r){if(r._id)location.reload();else alert('创建失败: '+JSON.stringify(r))})}</script>
-''', p='a', al=al)
-
-# ====== 日志 ======
-@app.route('/logs')
-@login_req
-def logs_page():
-    logs = api_get('/log')
-    ll = logs if isinstance(logs, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>📋 系统日志</h2>
-<button class="btn btn-s" onclick="location.reload()">刷新</button></div>
-<div class="card-bd"><table><tr><th>时间</th><th>级别</th><th>消息</th></tr>
-{%for l in ll%}<tr><td style="white-space:nowrap">{{l.timestamp or l.time or '-'}}</td>
-<td>{%if l.level=='error'%}<span class="tag tag-r">错误</span>{%elif l.level=='warn'%}<span class="tag tag-b">警告</span>{%else%}<span class="tag tag-gray">{{l.level or '-'}}</span>{%endif%}</td>
-<td style="font-size:12px">{{l.message or l.msg or '-'}}</td></tr>
-{%endfor%}{%if not ll%}<tr><td colspan="3" class="empty">暂无日志</td></tr>{%endif%}</table></div></div>
-''', p='cfg', ll=ll[-200:] if isinstance(ll, list) else ll)
-
-# ====== 审计日志 ======
-@app.route('/audit')
-@login_req
-def audit_page():
-    logs = api_get('/log/audit')
-    ll = logs if isinstance(logs, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>🔍 审计日志</h2>
-<button class="btn btn-s" onclick="location.reload()">刷新</button></div>
-<div class="card-bd"><table><tr><th>时间</th><th>类型</th><th>用户</th><th>IP</th><th>消息</th></tr>
-{%for l in ll%}<tr><td style="white-space:nowrap">{{l.timestamp or '-'}}</td>
-<td>{{l.type or '-'}}</td><td>{{l.user or '-'}}</td><td>{{l.remote_addr or '-'}}</td>
-<td style="font-size:12px">{{l.message or '-'}}</td></tr>
-{%endfor%}{%if not ll%}<tr><td colspan="5" class="empty">暂无审计日志</td></tr>{%endif%}</table></div></div>
-''', p='cfg', ll=ll[-200:] if isinstance(ll, list) else ll)
-
-# ====== 服务器日志 ======
-@app.route('/sv/<sid>/output')
-@login_req
-def sv_output(sid):
-    sv = api_get(f'/server/{sid}')
-    if not sv: return redirect('/servers')
-    r = api.get(f'/server/{sid}/output')
-    output = r.json() if r.status_code == 200 else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>📋 {{sv.name}} - 服务器日志</h2>
-<div class="btns"><button class="btn btn-s" onclick="location.reload()">刷新</button>
-<a href="/sv/{{sid}}" class="btn btn-s">返回</a></div></div>
-<div class="card-bd"><pre style="background:#f5f5f5;padding:12px;border-radius:4px;font-size:11px;max-height:600px;overflow:auto;white-space:pre-wrap">{%for line in output%}{{line}}
-{%endfor%}{%if not output%}暂无输出{%endif%}</pre></div></div>
-''', p='s', sv=sv, sid=sid, output=output if isinstance(output, list) else [str(output)])
+{% for u in users %}<tr>
+<td><a href="/usr/{{ u._org_id }}/{{ u._id }}"><b>{{ u.name }}</b></a></td>
+<td>{{ u._org_name }}</td>
+<td>{{ u.email or '-' }}</td>
+<td><span class="tag {{'tag-g' if not u.disabled else 'tag-r'}}">{{ '正常' if not u.disabled else '已禁用' }}</span></td>
+<td><a href="/usr/{{ u._org_id }}/{{ u._id }}" class="btn btn-s">详情</a></td>
+</tr>{% endfor %}
+{% if not users %}<tr><td colspan="5" class="empty">暂无用户</td></tr>{% endif %}
+</table></div></div>'''
+    return R(tpl, p='u', users=all_users)
 
 # ====== 用户详情 ======
 @app.route('/usr/<oid>/<uid>')
 @login_req
 def user_detail(oid, uid):
+    user = api_get(f'/user/{oid}/{uid}')
     org = api_get(f'/organization/{oid}')
-    u = api_get(f'/user/{oid}/{uid}')
-    if not u: return redirect(f'/org/{oid}')
     servers = api_get('/server')
-    org_servers = []
-    for s in (servers if isinstance(servers, list) else []):
-        org_servers.append(s)
-    return R('''
-<div class="card"><div class="card-hd"><h2>👤 {{u.name}}</h2>
-<div class="btns"><a href="/org/{{oid}}" class="btn btn-s">返回</a></div></div>
-<div class="card-bd"><div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-<div>
-<h3 style="margin-bottom:10px">基本信息</h3>
-<div class="fg"><label>用户名</label><input id="uname" value="{{u.name}}"></div>
-<div class="fg"><label>邮箱</label><input id="uemail" value="{{u.email or ''}}"></div>
-<div class="fg"><label>PIN码</label><input id="upin" value="{{u.pin or ''}}"><div class="tip">连接时需要输入</div></div>
-<div class="fg"><label>分组</label><input id="ugroups" value="{{(u.groups|join(', ')) if u.groups else ''}}"><div class="tip">多个逗号分隔</div></div>
-<div class="fg"><label>状态</label><select id="udisabled"><option value="false" {{'selected' if not u.disabled}}>启用</option><option value="true" {{'selected' if u.disabled}}>禁用</option></select></div>
-<div class="fg"><label>Google验证器</label><select id="uotp"><option value="true" {{'selected' if u.otp_auth}}>启用</option><option value="false" {{'selected' if not u.otp_auth}}>禁用</option></select></div>
-<div class="fg"><label>SSO认证绕过</label><select id="ubypass"><option value="false" {{'selected' if not u.bypass_secondary}}>否</option><option value="true" {{'selected' if u.bypass_secondary}}>是</option></select></div>
-<div class="fg"><label>DNS服务器</label><input id="udns" value="{{u.dns_server or ''}}"></div>
-<div class="fg"><label>虚拟网络</label><input id="uip" value="{{u.ip_address or ''}}"><div class="tip">留空自动分配</div></div>
-<div class="fg"><label>发送验证密钥</label><select id="uemailkey"><option value="false">否</option><option value="true">是</option></select></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">🔌 端口转发</h3>
-<div class="fg"><label>端口转发规则</label><input id="upfwd" value="{{u.port_forwarding if u.port_forwarding else ''}}"><div class="tip">格式: 协议:端口:目标IP:目标端口，多个用逗号分隔</div></div>
-<h3 style="margin:14px 0 10px;border-top:1px solid #f0f0f0;padding-top:12px">🌐 网络链接</h3>
-<div class="fg"><label>网络链接</label><input id="unetlink" value="{{u.network_links if u.network_links else ''}}"><div class="tip">格式: 网络地址/掩码，多个用逗号分隔</div></div>
-<button class="btn btn-p" onclick="saveU()">保存</button>
-</div>
-<div>
-<h3 style="margin-bottom:10px">快捷操作</h3>
-<div class="btns" style="flex-direction:column;gap:8px">
-<a href="/data/{{oid}}/{{u._id}}.tar" class="btn" style="text-align:center">📥 下载配置文件</a>
-<button class="btn" style="text-align:center" onclick="api('PUT','/api/usr/{{oid}}/{{u._id}}',{disabled:{{'false' if u.disabled else 'true'}}},function(){location.reload()})">{{'✅ 启用此用户' if u.disabled else '🚫 禁用此用户'}}</button>
-<button class="btn" style="text-align:center" onclick="api('PUT','/api/usr/{{oid}}/{{u._id}}/otp',{},function(){toast('已重置OTP')})">🔄 重置OTP密钥</a>
-<button class="btn btn-d" style="text-align:center" onclick="cd('{{u.name}}',function(){api('DELETE','/api/usr/{{oid}}/{{u._id}}',null,function(){window.location='/org/{{oid}}'})})">🗑️ 删除用户</button>
-<a href="/usr/{{oid}}/{{u._id}}/audit" class="btn" style="text-align:center">📋 用户审计</a>
-</div>
-<h3 style="margin:16px 0 10px">用户信息</h3>
-<table><tr><td><b>组织</b></td><td>{{org.name}}</td></tr>
-<tr><td><b>创建时间</b></td><td>{{u.timestamp or '-'}}</td></tr>
-<tr><td><b>最后连接</b></td><td>{{u.last_active or '-'}}</td></tr>
-<tr><td><b>MAC地址</b></td><td>{{u.mac_address or '-'}}</td></tr>
-</table>
-</div></div></div></div>
-<script>function saveU(){var g=document.getElementById('ugroups').value;var pf=document.getElementById('upfwd').value;var nl=document.getElementById('unetlink').value;var d={name:document.getElementById('uname').value,email:document.getElementById('uemail').value||null,pin:document.getElementById('upin').value||null,groups:g?g.split(',').map(function(x){return x.trim()}):[],disabled:document.getElementById('udisabled').value==='true',otp_auth:document.getElementById('uotp').value==='true',bypass_secondary:document.getElementById('ubypass').value==='true',dns_server:document.getElementById('udns').value||null,ip_address:document.getElementById('uip').value||null};if(pf)d.port_forwarding=pf;if(nl)d.network_links=nl;api('PUT','/api/usr/{{oid}}/{{u._id}}',d,function(r){if(r)toast('已保存');else toast('保存失败','r')})}</script>
-''', p='u', u=u, oid=oid, org=org if org else {})
+    devices = api_get(f'/user/{oid}/{uid}/device')
+    keys_info = {}
+    for s in servers:
+        try:
+            r = api.get(f'/key/{oid}/{uid}/{s["_id"]}.key')
+            if r.status_code == 200:
+                keys_info[s['_id']] = r.text[:200]
+        except:
+            pass
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ user.name }} - 用户详情</h2>
+<div class="btns">
+<a href="/data/{{ oid }}/{{ uid }}.tar" class="btn">下载配置(.tar)</a>
+<a href="/data/{{ oid }}/{{ uid }}.zip" class="btn">下载配置(.zip)</a>
+<a href="/data/{{ oid }}/{{ uid }}.onc" class="btn">下载配置(.onc)</a>
+<a href="/usr/{{ oid }}/{{ uid }}/audit" class="btn">审计日志</a>
+<button class="btn" onclick="api('PUT','/api/usr/{{ oid }}/{{ uid }}/otp',null,function(r){if(r.error)toast(r.error,'r');else toast('OTP已重置')})">重置OTP</button>
+</div></div>
+<div class="card-bd">
+<div class="fg"><label>用户名</label><input id="eName" value="{{ user.name }}"></div>
+<div class="fg"><label>邮箱</label><input id="eEmail" value="{{ user.email or '' }}"></div>
+<div class="fg"><label>PIN</label><input id="ePin" value="{{ user.pin or '' }}" placeholder="留空表示无PIN"></div>
+<div class="fg"><label>状态</label><select id="eDisabled">
+<option value="false" {{'selected' if not user.disabled}}>正常</option>
+<option value="true" {{'selected' if user.disabled}}>已禁用</option></select></div>
+<div class="fg"><label>分组</label><input id="eGroups" value="{{ user.groups|join(', ') if user.groups else '' }}" placeholder="用逗号分隔"></div>
+<div class="fg"><label>绕过二次验证</label><select id="eBypass">
+<option value="false" {{'selected' if not user.bypass_secondary}}>否</option>
+<option value="true" {{'selected' if user.bypass_secondary}}>是</option></select></div>
+<div class="fg"><label>客户端互通</label><select id="eC2c">
+<option value="false" {{'selected' if not user.client_to_client}}>否</option>
+<option value="true" {{'selected' if user.client_to_client}}>是</option></select></div>
+<div class="fg"><label>端口转发</label><textarea id="ePf" rows="3" placeholder="格式: 源端口:目标IP:目标端口/协议">{{ user.port_forwarding|join('\\n') if user.port_forwarding else '' }}</textarea></div>
+<button class="btn btn-p" onclick="usrSave()">保存</button>
+</div></div>
+
+<div class="card"><div class="card-hd"><h2>关联服务器</h2></div>
+<div class="card-bd"><table><tr><th>服务器</th><th>状态</th><th>操作</th></tr>
+{% for s in servers %}<tr>
+<td>{{ s.name }}</td>
+<td>{% if s._id in keys_info %}<span class="tag tag-g">已配置</span>{% else %}<span class="tag tag-gray">未配置</span>{% endif %}</td>
+<td class="btns">
+<a href="/data/{{ oid }}/{{ uid }}.tar" class="btn btn-s">下载</a>
+</td></tr>{% endfor %}
+</table></div></div>
+
+<div class="card"><div class="card-hd"><h2>设备管理</h2></div>
+<div class="card-bd"><table><tr><th>设备ID</th><th>名称</th><th>平台</th><th>操作</th></tr>
+{% for d in devices %}<tr>
+<td>{{ d._id or d.id }}</td>
+<td>{{ d.name or '-' }}</td>
+<td>{{ d.platform or '-' }}</td>
+<td><button class="btn btn-s btn-d" onclick="cd('{{ d.name or d._id }}',function(){api('DELETE','/api/device/{{ oid }}/{{ uid }}/{{ d._id or d.id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+</tr>{% endfor %}
+{% if not devices %}<tr><td colspan="4" class="empty">暂无设备</td></tr>{% endif %}
+</table></div></div>
+<script>
+function usrSave(){var pf=document.getElementById('ePf').value.split('\\n').filter(function(x){return x.trim()});api('PUT','/api/usr/{{ oid }}/{{ uid }}',{name:document.getElementById('eName').value,email:document.getElementById('eEmail').value,pin:document.getElementById('ePin').value||null,disabled:document.getElementById('eDisabled').value=='true',groups:document.getElementById('eGroups').value.split(',').map(function(x){return x.trim()}).filter(function(x){return x}),bypass_secondary:document.getElementById('eBypass').value=='true',client_to_client:document.getElementById('eC2c').value=='true',port_forwarding:pf},function(r){if(r.error)toast(r.error,'r');else toast('保存成功')})}
+</script>'''
+    return R(tpl, p='u', oid=oid, uid=uid, user=user, org=org, servers=servers, devices=devices, keys_info=keys_info)
+
+# ====== 用户审计 ======
+@app.route('/usr/<oid>/<uid>/audit')
+@login_req
+def user_audit(oid, uid):
+    user = api_get(f'/user/{oid}/{uid}')
+    audit = api_get(f'/user/{oid}/{uid}/audit')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ user.name }} - 审计日志</h2></div>
+<div class="card-bd"><table><tr><th>时间</th><th>事件</th><th>IP</th><th>详情</th></tr>
+{% for a in audit %}<tr>
+<td>{{ a.timestamp }}</td>
+<td>{{ a.type or a.event }}</td>
+<td>{{ a.remote_address or '-' }}</td>
+<td>{{ a.message or '-' }}</td>
+</tr>{% endfor %}
+{% if not audit %}<tr><td colspan="4" class="empty">暂无审计记录</td></tr>{% endif %}
+</table></div></div>'''
+    return R(tpl, p='u', oid=oid, uid=uid, user=user, audit=audit)
 
 # ====== 批量添加用户 ======
 @app.route('/org/<oid>/bulk')
 @login_req
 def bulk_add_page(oid):
     org = api_get(f'/organization/{oid}')
-    if not org: return redirect('/orgs')
-    return R('''
-<div class="card"><div class="card-hd"><h2>👥 批量添加用户 - {{org.name}}</h2>
-<a href="/org/{{oid}}" class="btn btn-s">返回</a></div>
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ org.name }} - 批量添加用户</h2></div>
 <div class="card-bd">
-<div class="fg"><label>用户列表（每行一个，格式：用户名,邮箱,PIN）</label>
-<textarea id="bulk" rows="12" placeholder="zhangsan,zhang@test.com,1234&#10;lisi,lisi@test.com&#10;wangwu"></textarea>
-<div class="tip">邮箱和PIN可选，用逗号分隔。留空的字段将不设置。</div></div>
+<div class="fg"><label>用户列表</label><textarea id="bulk" rows="10" placeholder="每行一个用户名，格式: 用户名,邮箱,PIN&#10;例如:&#10;zhangsan,zhangsan@example.com,123456&#10;lisi,lisi@example.com"></textarea>
+<div class="tip">支持格式: 用户名 或 用户名,邮箱 或 用户名,邮箱,PIN</div></div>
 <button class="btn btn-p" onclick="bulkAdd()">批量添加</button>
-<div id="bulkResult" style="margin-top:10px;font-size:12px"></div>
+<div id="bulkResult" style="margin-top:12px"></div>
 </div></div>
-<script>function bulkAdd(){var lines=document.getElementById('bulk').value.trim().split('\n');var results=[];var done=0;var total=lines.length;lines.forEach(function(line,i){line=line.trim();if(!line){done++;return}var parts=line.split(',');var d={name:parts[0].trim()};if(parts[1])d.email=parts[1].trim();if(parts[2])d.pin=parts[2].trim();api('POST','/api/usr/{{oid}}',d,function(r){done++;if(r&&r.name){results.push('✅ '+d.name+' 成功')}else{results.push('❌ '+d.name+' 失败: '+(r&&r.error||'未知错误'))}if(done===total){document.getElementById('bulkResult').innerHTML=results.join('<br>')}})})}</script>
-''', p='u', org=org, oid=oid)
+<script>
+function bulkAdd(){var lines=document.getElementById('bulk').value.split('\\n').filter(function(l){return l.trim()});var results=[];var done=0;
+lines.forEach(function(line){var parts=line.split(',');var u={name:parts[0].trim()};if(parts[1])u.email=parts[1].trim();if(parts[2])u.pin=parts[2].trim();
+api('POST','/api/usr/{{ oid }}',u,function(r){done++;if(r&&r._id)results.push('<span class="tag tag-g">'+u.name+' ✓</span>');else results.push('<span class="tag tag-r">'+u.name+' ✗</span>');
+if(done==lines.length)document.getElementById('bulkResult').innerHTML=results.join(' ')})})}
+</script>'''
+    return R(tpl, p='o', oid=oid, org=org)
 
-# ====== 邮件发送 ======
+# ====== 发送邮件 ======
 @app.route('/org/<oid>/email')
 @login_req
 def email_users_page(oid):
     org = api_get(f'/organization/{oid}')
-    if not org: return redirect('/orgs')
-    return R('''
-<div class="card"><div class="card-hd"><h2>📧 发送邮件 - {{org.name}}</h2>
-<a href="/org/{{oid}}" class="btn btn-s">返回</a></div>
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ org.name }} - 发送配置邮件</h2></div>
 <div class="card-bd">
-<div class="fg"><label>收件人</label><select id="eto"><option value="all">全部用户</option><option value="selected">选中用户</option></select></div>
-<div class="fg"><label>用户列表（逗号分隔用户名，选择"选中用户"时生效）</label><input id="esel" placeholder="zhangsan,lisi,wangwu"></div>
-<div class="fg"><label>主题</label><input id="esubj" placeholder="VPN配置更新通知"></div>
-<div class="fg"><label>内容</label><textarea id="ebody" rows="8" placeholder="请输入邮件内容..."></textarea></div>
-<button class="btn btn-p" onclick="sendEmail()">发送</button>
-<div id="emailResult" style="margin-top:10px;font-size:12px"></div>
-</div></div>
-<script>function sendEmail(){var d={type:document.getElementById('eto').value,subject:document.getElementById('esubj').value,body:document.getElementById('ebody').value};if(d.type==='selected')d.users=document.getElementById('esel').value.split(',').map(function(x){return x.trim()});api('POST','/api/org/{{oid}}/email',d,function(r){if(r&&r.ok)toast('邮件已发送');else toast('发送失败','r')})}</script>
-''', p='u', org=org, oid=oid)
-
-# ====== 用户OTP重置 ======
-@app.route('/api/usr/<oid>/<uid>/otp', methods=['PUT'])
-@login_req
-def api_usr_reset_otp(oid, uid):
-    r = api.put(f'/user/{oid}/{uid}', {'otp_secret': ''})
-    return jsonify({'ok': r.status_code == 200}) if r else jsonify({'error': 'failed'}), 400
-
-# ====== Settings API ======
-@app.route('/api/settings', methods=['GET','PUT'])
-@login_req
-def api_settings():
-    if request.method == 'GET':
-        r = api.get('/settings')
-        return r.json() if r.status_code == 200 else jsonify({})
-    r = api.put('/settings', request.json)
-    return r.json() if r.status_code == 200 else jsonify({'error': r.text}), r.status_code
-
-# ====== Admin API ======
-@app.route('/api/admin', methods=['GET','POST'])
-@login_req
-def api_admin_list():
-    if request.method == 'GET':
-        r = api.get('/administrators')
-        return r.json() if r.status_code == 200 else []
-    r = api.post('/administrators', request.json)
-    return r.json() if r.status_code == 200 else jsonify({'error': r.text}), r.status_code
-
-@app.route('/api/admin/<aid>', methods=['DELETE'])
-@login_req
-def api_admin_del(aid):
-    return jsonify({'ok': api.delete(f'/administrators/{aid}').status_code == 200})
-
-# ====== Email API ======
-@app.route('/api/org/<oid>/email', methods=['POST'])
-@login_req
-def api_org_email(oid):
-    data = request.json or {}
-    subject = data.get('subject', '')
-    body = data.get('body', '')
-    # Get users
-    ud = api_get(f'/user/{oid}')
-    ul = ud.get('users', ud) if isinstance(ud, dict) else (ud if isinstance(ud, list) else [])
-    if data.get('type') == 'selected':
-        names = data.get('users', [])
-        ul = [u for u in ul if u.get('name') in names]
-    emails = [u.get('email') for u in ul if u.get('email')]
-    if not emails:
-        return jsonify({'ok': False, 'error': '没有可发送的邮箱地址'}), 400
-    # Send via pritunl email API if available, otherwise return info
-    r = api.post(f'/user/{oid}/email', {'subject': subject, 'message': body, 'user_ids': [u['_id'] for u in ul]})
-    if r and r.status_code == 200:
-        return jsonify({'ok': True, 'count': len(emails)})
-    return jsonify({'ok': False, 'error': '发送失败，请检查SMTP设置'})
+<p style="margin-bottom:12px;color:#666">将向组织内所有用户发送VPN配置邮件</p>
+<button class="btn btn-p" onclick="api('POST','/api/org/{{ oid }}/email',null,function(r){if(r.error)toast(r.error,'r');else toast('邮件已发送')})">发送邮件</button>
+</div></div>'''
+    return R(tpl, p='o', oid=oid, org=org)
 
 # ====== 主机管理 ======
 @app.route('/hosts')
 @login_req
 def hosts_page():
     hosts = api_get('/host')
-    hl = hosts if isinstance(hosts, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>🖧 主机管理</h2>
-<button class="btn btn-s" onclick="location.reload()">刷新</button></div>
-<div class="card-bd"><table><tr><th>名称</th><th>主机名</th><th>公网地址</th><th>绑定地址</th><th>可用组</th><th>状态</th><th>操作</th></tr>
-{%for h in hl%}<tr>
-<td><b>{{h.name or h._id or '-'}}</b></td>
-<td>{{h.hostname or '-'}}</td>
-<td>{{h.public_address or '-'}}</td>
-<td>{{h.bind_address or '-'}}</td>
-<td>{{h.availability_group or '默认'}}</td>
-<td>{%if h.status=='online'%}<span class="tag tag-g">在线</span>{%elif h.status%}<span class="tag tag-r">{{h.status}}</span>{%else%}<span class="tag tag-gray">未知</span>{%endif%}</td>
-<td class="btns">
-<button class="btn btn-s" onclick="mo('editH{{loop.index}}')">设置</button>
-</td></tr>
-<div class="mo" id="editH{{loop.index}}"><div class="md"><div class="md-hd"><h3>主机设置 - {{h.name or h._id}}</h3><button class="md-x" onclick="mc('editH{{loop.index}}')">&times;</button></div>
+    servers = api_get('/server')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>主机管理</h2></div>
+<div class="card-bd"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>可用性组</th><th>操作</th></tr>
+{% for h in hosts %}<tr>
+<td>{{ h.name or h._id }}</td>
+<td>{{ h.public_address or h.address or '-' }}</td>
+<td><span class="tag {{'tag-g' if h.status=='online' else 'tag-r'}}">{{ h.status or '未知' }}</span></td>
+<td>{{ h.availability_group or '-' }}</td>
+<td class="btns"><button class="btn btn-s" onclick="hostEdit('{{ h._id }}')">设置</button></td>
+</tr>{% endfor %}
+{% if not hosts %}<tr><td colspan="5" class="empty">暂无主机</td></tr>{% endif %}
+</table></div></div>
+<div class="mo" id="mHost"><div class="md"><div class="md-hd"><h3>主机设置</h3><button class="md-x" onclick="mc('mHost')">×</button></div>
 <div class="md-bd">
-<div class="fg"><label>公网地址</label><input id="hpa{{loop.index}}" value="{{h.public_address or ''}}"></div>
-<div class="fg"><label>绑定地址</label><input id="hba{{loop.index}}" value="{{h.bind_address or ''}}"></div>
-<div class="fg"><label>可用组</label><input id="hag{{loop.index}}" value="{{h.availability_group or ''}}"></div>
-</div><div class="md-ft"><button class="btn" onclick="mc('editH{{loop.index}}')">取消</button>
-<button class="btn btn-p" onclick="saveH('{{h._id}}','{{loop.index}}')">保存</button></div></div></div>
-{%endfor%}{%if not hl%}<tr><td colspan="7" class="empty">暂无主机</td></tr>{%endif%}</table></div></div>
-<script>function saveH(hid,idx){var d={public_address:document.getElementById('hpa'+idx).value||null,bind_address:document.getElementById('hba'+idx).value||null,availability_group:document.getElementById('hag'+idx).value||null};api('PUT','/api/host/'+hid,d,function(r){if(r)toast('已保存');else toast('保存失败','r')})}</script>
-''', p='h', hl=hl)
+<div class="fg"><label>公开地址</label><input id="hAddr"></div>
+<div class="fg"><label>绑定地址</label><input id="hBind"></div>
+<div class="fg"><label>可用性组</label><input id="hAg"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mHost')">取消</button>
+<button class="btn btn-p" onclick="hostSave()">保存</button></div></div></div>
+<script>
+var hostId='';
+function hostEdit(id){hostId=id;api('GET','/api/host/'+id,null,function(h){document.getElementById('hAddr').value=h.public_address||'';document.getElementById('hBind').value=h.bind_address||'';document.getElementById('hAg').value=h.availability_group||'';mo('mHost')})}
+function hostSave(){api('PUT','/api/host/'+hostId,{public_address:document.getElementById('hAddr').value,bind_address:document.getElementById('hBind').value,availability_group:document.getElementById('hAg').value},function(r){if(r.error)toast(r.error,'r');else{mc('mHost');toast('保存成功')}})}
+</script>'''
+    return R(tpl, p='h', hosts=hosts, servers=servers)
 
 # ====== 链接管理 ======
 @app.route('/links')
 @login_req
 def links_page():
     links = api_get('/link')
-    ll = links if isinstance(links, list) else []
-    servers = api_get('/server')
-    sl = servers if isinstance(servers, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>🔗 链接管理</h2>
-<button class="btn btn-p" onclick="mo('addL')">+ 添加链接</button></div>
-<div class="card-bd"><table><tr><th>名称</th><th>服务器1</th><th>服务器2</th><th>状态</th><th>操作</th></tr>
-{%for l in ll%}<tr>
-<td><b>{{l.name or l._id or '-'}}</b></td>
-<td>{{l.server_id or '-'}}</td>
-<td>{{l.server_id_b or '-'}}</td>
-<td>{%if l.status=='active'%}<span class="tag tag-g">活跃</span>{%elif l.status%}<span class="tag tag-b">{{l.status}}</span>{%else%}<span class="tag tag-gray">未知</span>{%endif%}</td>
-<td class="btns">
-<button class="btn btn-s" onclick="mo('editL{{loop.index}}')">设置</button>
-<button class="btn btn-s btn-d" onclick="cd('{{l.name or l._id}}',function(){api('DELETE','/api/link/{{l._id}}',null,function(){location.reload()})})">删除</button>
-</td></tr>
-<div class="mo" id="editL{{loop.index}}"><div class="md"><div class="md-hd"><h3>链接设置</h3><button class="md-x" onclick="mc('editL{{loop.index}}')">&times;</button></div>
-<div class="md-bd">
-<div class="fg"><label>名称</label><input id="ln{{loop.index}}" value="{{l.name or ''}}"></div>
-</div><div class="md-ft"><button class="btn" onclick="mc('editL{{loop.index}}')">取消</button>
-<button class="btn btn-p" onclick="saveL('{{l._id}}','{{loop.index}}')">保存</button></div></div></div>
-{%endfor%}{%if not ll%}<tr><td colspan="5" class="empty">暂无链接</td></tr>{%endif%}</table></div></div>
-<div class="mo" id="addL"><div class="md"><div class="md-hd"><h3>添加链接</h3><button class="md-x" onclick="mc('addL')">&times;</button></div>
-<div class="md-bd">
-<div class="fg"><label>名称</label><input id="alname" placeholder="如：站点间链接"></div>
-<div class="fg"><label>服务器A</label><select id="alsa">{%for s in sl%}<option value="{{s._id}}">{{s.name}}</option>{%endfor%}</select></div>
-<div class="fg"><label>服务器B</label><select id="alsb">{%for s in sl%}<option value="{{s._id}}">{{s.name}}</option>{%endfor%}</select></div>
-</div><div class="md-ft"><button class="btn" onclick="mc('addL')">取消</button>
-<button class="btn btn-p" onclick="addL()">创建</button></div></div></div>
-<script>function addL(){var d={name:document.getElementById('alname').value,server_id:document.getElementById('alsa').value,server_id_b:document.getElementById('alsb').value};api('POST','/api/link',d,function(r){if(r&&r._id)location.reload();else alert('创建失败: '+JSON.stringify(r))})}
-function saveL(lid,idx){var d={name:document.getElementById('ln'+idx).value};api('PUT','/api/link/'+lid,d,function(r){if(r)toast('已保存');else toast('保存失败','r')})}</script>
-''', p='l', ll=ll, sl=sl)
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>链接管理</h2>
+<button class="btn btn-p" onclick="mo('mLink')">+ 创建链接</button></div>
+<div class="card-bd"><table><tr><th>名称</th><th>URI ID</th><th>操作</th></tr>
+{% for l in links %}<tr>
+<td>{{ l.name or l._id }}</td>
+<td>{{ l.uri_id or '-' }}</td>
+<td class="btns"><button class="btn btn-s" onclick="linkEdit('{{ l._id }}')">编辑</button>
+<button class="btn btn-s btn-d" onclick="cd('{{ l.name }}',function(){api('DELETE','/api/link/{{ l._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+</tr>{% endfor %}
+{% if not links %}<tr><td colspan="3" class="empty">暂无链接</td></tr>{% endif %}
+</table></div></div>
+<div class="mo" id="mLink"><div class="md"><div class="md-hd"><h3>创建链接</h3><button class="md-x" onclick="mc('mLink')">×</button></div>
+<div class="md-bd"><div class="fg"><label>名称</label><input id="lName"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mLink')">取消</button>
+<button class="btn btn-p" onclick="api('POST','/api/link',{name:document.getElementById('lName').value},function(r){if(r&&r._id){toast('创建成功');location.reload()}else toast('创建失败','r')})">创建</button></div></div></div>
+<div class="mo" id="mLinkEdit"><div class="md"><div class="md-hd"><h3>编辑链接</h3><button class="md-x" onclick="mc('mLinkEdit')">×</button></div>
+<div class="md-bd"><div class="fg"><label>名称</label><input id="leName"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mLinkEdit')">取消</button>
+<button class="btn btn-p" onclick="api('PUT','/api/link/'+linkId,{name:document.getElementById('leName').value},function(r){if(r.error)toast(r.error,'r');else{mc('mLinkEdit');location.reload()}})">保存</button></div></div></div>
+<script>
+var linkId='';
+function linkEdit(id){linkId=id;api('GET','/api/link/'+id,null,function(l){document.getElementById('leName').value=l.name||'';mo('mLinkEdit')})}
+</script>'''
+    return R(tpl, p='l', links=links)
 
 # ====== 设备管理 ======
 @app.route('/devices')
 @login_req
 def devices_page():
-    org = api_get('/organization')
-    all_devs = []
-    for o in (org if isinstance(org, list) else []):
-        ud = api_get(f'/user/{o["id"]}')
-        ul = ud.get('users', ud) if isinstance(ud, dict) else (ud if isinstance(ud, list) else [])
-        for u in ul:
-            devs = api_get(f'/user/{o["id"]}/{u["_id"]}/device')
-            dl = devs if isinstance(devs, list) else []
-            for d in dl:
-                d['_uname'] = u.get('name', '')
-                d['_oid'] = o['id']
-                d['_uid'] = u['_id']
-                d['_oname'] = o.get('name', '')
-                all_devs.append(d)
-    return R('''
-<div class="card"><div class="card-hd"><h2>📱 设备管理</h2>
-<button class="btn btn-s" onclick="location.reload()">刷新</button></div>
-<div class="card-bd"><table><tr><th>用户</th><th>组织</th><th>设备名称</th><th>平台</th><th>设备ID</th><th>操作</th></tr>
-{%for d in dl%}<tr>
-<td><b>{{d._uname}}</b></td>
-<td>{{d._oname}}</td>
-<td>{{d.name or d.platform_device_name or '-'}}</td>
-<td>{{d.platform or '-'}}</td>
-<td style="font-size:11px">{{d._id or d.device_id or '-'}}</td>
-<td class="btns">
-<button class="btn btn-s btn-d" onclick="cd('此设备',function(){api('DELETE','/api/device/{{d._oid}}/{{d._uid}}/{{d._id}}',null,function(){location.reload()})})">移除</button>
-</td></tr>
-{%endfor%}{%if not dl%}<tr><td colspan="6" class="empty">暂无注册设备</td></tr>{%endif%}</table></div></div>
-''', p='dv', dl=all_devs)
+    orgs = api_get('/organization')
+    all_devices = []
+    for o in orgs:
+        users = api_get(f'/user/{o["_id"]}')
+        for u in users:
+            devices = api_get(f'/user/{o["_id"]}/{u["_id"]}/device')
+            for d in devices:
+                d['_org'] = o.get('name','')
+                d['_user'] = u.get('name','')
+                d['_org_id'] = o['_id']
+                d['_user_id'] = u['_id']
+                all_devices.append(d)
+    unregistered = api_get('/device/unregistered')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>设备管理</h2></div>
+<div class="card-bd"><table><tr><th>设备ID</th><th>名称</th><th>平台</th><th>用户</th><th>组织</th><th>操作</th></tr>
+{% for d in devices %}<tr>
+<td>{{ d._id or d.id }}</td>
+<td>{{ d.name or '-' }}</td>
+<td>{{ d.platform or '-' }}</td>
+<td>{{ d._user }}</td>
+<td>{{ d._org }}</td>
+<td><button class="btn btn-s btn-d" onclick="cd('{{ d.name or d._id }}',function(){api('DELETE','/api/device/{{ d._org_id }}/{{ d._user_id }}/{{ d._id or d.id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+</tr>{% endfor %}
+{% if not devices %}<tr><td colspan="6" class="empty">暂无设备</td></tr>{% endif %}
+</table></div></div>
 
-# ====== 用户审计 ======
-@app.route('/usr/<oid>/<uid>/audit')
+{% if unregistered %}
+<div class="card"><div class="card-hd"><h2>未注册设备</h2></div>
+<div class="card-bd"><table><tr><th>设备ID</th><th>名称</th><th>平台</th></tr>
+{% for d in unregistered %}<tr>
+<td>{{ d._id or d.id }}</td>
+<td>{{ d.name or '-' }}</td>
+<td>{{ d.platform or '-' }}</td>
+</tr>{% endfor %}
+</table></div></div>
+{% endif %}'''
+    return R(tpl, p='dv', devices=all_devices, unregistered=unregistered)
+
+# ====== 管理员 ======
+@app.route('/admins')
 @login_req
-def user_audit(oid, uid):
-    org = api_get(f'/organization/{oid}')
-    u = api_get(f'/user/{oid}/{uid}')
-    if not u: return redirect(f'/org/{oid}')
-    r = api.get(f'/user/{oid}/{uid}/audit')
-    audit = r.json() if r.status_code == 200 else []
-    al = audit if isinstance(audit, list) else []
-    return R('''
-<div class="card"><div class="card-hd"><h2>📋 {{u.name}} - 审计事件</h2>
-<div class="btns"><button class="btn btn-s" onclick="location.reload()">刷新</button>
-<a href="/usr/{{oid}}/{{uid}}" class="btn btn-s">返回</a></div></div>
-<div class="card-bd"><table><tr><th>时间</th><th>类型</th><th>消息</th><th>IP地址</th></tr>
-{%for a in al%}<tr>
-<td style="white-space:nowrap">{{a.timestamp or '-'}}</td>
-<td>{{a.type or a.event or '-'}}</td>
-<td style="font-size:12px">{{a.message or a.msg or '-'}}</td>
-<td>{{a.remote_addr or a.ip_address or '-'}}</td>
-</tr>{%endfor%}{%if not al%}<tr><td colspan="4" class="empty">暂无审计事件</td></tr>{%endif%}</table></div></div>
-''', p='u', u=u or {}, oid=oid, uid=uid, al=al[-200:])
+def admins_page():
+    admins = api_get('/admin')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>管理员管理</h2>
+<button class="btn btn-p" onclick="mo('mAdmin')">+ 添加管理员</button></div>
+<div class="card-bd"><table><tr><th>用户名</th><th>操作</th></tr>
+{% for a in admins %}<tr>
+<td>{{ a.username or a.name }}</td>
+<td class="btns"><a href="/admin/{{ a._id }}/audit" class="btn btn-s">审计</a>
+<button class="btn btn-s btn-d" onclick="cd('{{ a.username }}',function(){api('DELETE','/api/admin/{{ a._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+</tr>{% endfor %}
+{% if not admins %}<tr><td colspan="2" class="empty">暂无管理员</td></tr>{% endif %}
+</table></div></div>
+<div class="mo" id="mAdmin"><div class="md"><div class="md-hd"><h3>添加管理员</h3><button class="md-x" onclick="mc('mAdmin')">×</button></div>
+<div class="md-bd"><div class="fg"><label>用户名</label><input id="aName"></div>
+<div class="fg"><label>密码</label><input id="aPass" type="password"></div>
+<div class="fg"><label>密码(确认)</label><input id="aPass2" type="password"></div></div>
+<div class="md-ft"><button class="btn" onclick="mc('mAdmin')">取消</button>
+<button class="btn btn-p" onclick="if(document.getElementById('aPass').value!=document.getElementById('aPass2').value){toast('两次密码不一致','r');return}api('POST','/api/admin',{username:document.getElementById('aName').value,password:document.getElementById('aPass').value},function(r){if(r.error)toast(r.error,'r');else{mc('mAdmin');location.reload()}})">添加</button></div></div></div>'''
+    return R(tpl, p='a', admins=admins)
 
-# ====== Bandwidth API ======
+# ====== 管理员审计 ======
+@app.route('/admin/<aid>/audit')
+@login_req
+def admin_audit(aid):
+    admin = api_get(f'/admin/{aid}')
+    audit = api_get(f'/admin/{aid}/audit')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ admin.username or admin.name }} - 审计日志</h2></div>
+<div class="card-bd"><table><tr><th>时间</th><th>事件</th><th>IP</th><th>详情</th></tr>
+{% for a in audit %}<tr>
+<td>{{ a.timestamp }}</td>
+<td>{{ a.type or a.event }}</td>
+<td>{{ a.remote_address or '-' }}</td>
+<td>{{ a.message or '-' }}</td>
+</tr>{% endfor %}
+{% if not audit %}<tr><td colspan="4" class="empty">暂无审计记录</td></tr>{% endif %}
+</table></div></div>'''
+    return R(tpl, p='a', admin=admin, audit=audit)
+
+# ====== 日志 ======
+@app.route('/logs')
+@login_req
+def logs_page():
+    logs = api_get('/log')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>系统日志</h2></div>
+<div class="card-bd"><table><tr><th>时间</th><th>级别</th><th>消息</th><th>操作</th></tr>
+{% for l in logs %}<tr>
+<td>{{ l.timestamp }}</td>
+<td><span class="tag {{'tag-r' if l.level=='error' else 'tag-b' if l.level=='warning' else 'tag-gray'}}">{{ l.level }}</span></td>
+<td>{{ l.message }}</td>
+<td><button class="btn btn-s btn-d" onclick="api('DELETE','/api/log/{{ l._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">删除</button></td>
+</tr>{% endfor %}
+{% if not logs %}<tr><td colspan="4" class="empty">暂无日志</td></tr>{% endif %}
+</table></div></div>'''
+    return R(tpl, p='cfg', logs=logs)
+
+# ====== 审计 ======
+@app.route('/audit')
+@login_req
+def audit_page():
+    audit = api_get('/audit')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>审计日志</h2></div>
+<div class="card-bd"><table><tr><th>时间</th><th>事件</th><th>用户</th><th>IP</th><th>详情</th></tr>
+{% for a in audit %}<tr>
+<td>{{ a.timestamp }}</td>
+<td>{{ a.type or a.event }}</td>
+<td>{{ a.user_name or '-' }}</td>
+<td>{{ a.remote_address or '-' }}</td>
+<td>{{ a.message or '-' }}</td>
+</tr>{% endfor %}
+{% if not audit %}<tr><td colspan="5" class="empty">暂无审计记录</td></tr>{% endif %}
+</table></div></div>'''
+    return R(tpl, p='cfg', audit=audit)
+
+# ====== 设置 ======
+@app.route('/settings')
+@login_req
+def settings_page():
+    settings = api_get('/settings')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>系统设置</h2></div>
+<div class="card-bd">
+<h3 style="margin-bottom:12px;font-size:14px">基本设置</h3>
+<div class="fg"><label>服务器名称</label><input id="sName" value="{{ settings.server_name or '' }}"></div>
+<div class="fg"><label>主题</label><select id="sTheme">
+<option value="light" {{'selected' if settings.theme=='light'}}>浅色</option>
+<option value="dark" {{'selected' if settings.theme=='dark'}}>深色</option></select></div>
+<div class="fg"><label>自动更新</label><select id="sUpdate">
+<option value="false" {{'selected' if not settings.auto_update}}>关闭</option>
+<option value="true" {{'selected' if settings.auto_update}}>开启</option></select></div>
+
+<h3 style="margin:16px 0 12px;font-size:14px">Let's Encrypt SSL</h3>
+<div class="fg"><label>域名</label><input id="sLeDomain" value="{{ settings.lets_encrypt_domain or '' }}" placeholder="如: vpn.example.com"></div>
+
+<h3 style="margin:16px 0 12px;font-size:14px">SSO配置</h3>
+<div class="fg"><label>SSO模式</label><select id="sSso">
+<option value="" {{'selected' if not settings.sso}}>关闭</option>
+<option value="saml" {{'selected' if settings.sso=='saml'}}>SAML</option>
+<option value="google" {{'selected' if settings.sso=='google'}}>Google</option>
+<option value="azure" {{'selected' if settings.sso=='azure'}}>Azure</option>
+<option value="slack" {{'selected' if settings.sso=='slack'}}>Slack</option>
+<option value="okta" {{'selected' if settings.sso=='okta'}}>Okta</option>
+<option value="onelogin" {{'selected' if settings.sso=='onelogin'}}>OneLogin</option>
+<option value="jumpcloud" {{'selected' if settings.sso=='jumpcloud'}}>JumpCloud</option>
+<option value="duo" {{'selected' if settings.sso=='duo'}}>Duo</option>
+<option value="radius" {{'selected' if settings.sso=='radius'}}>Radius</option></select></div>
+<div class="fg"><label>SSO组织</label><input id="sSsoOrg" value="{{ settings.sso_org or '' }}"></div>
+<div class="fg"><label>SAML SSO URL</label><input id="sSamlUrl" value="{{ settings.saml_sso_url or '' }}"></div>
+<div class="fg"><label>SAML Issuer</label><input id="sSamlIssuer" value="{{ settings.saml_issuer or '' }}"></div>
+<div class="fg"><label>SAML Certificate</label><textarea id="sSamlCert" rows="4">{{ settings.saml_certificate or '' }}</textarea></div>
+<div class="fg"><label>Duo Integration Key</label><input id="sDuoIkey" value="{{ settings.duo_ikey or '' }}"></div>
+<div class="fg"><label>Duo Secret Key</label><input id="sDuoSkey" value="{{ settings.duo_skey or '' }}"></div>
+<div class="fg"><label>Duo API Hostname</label><input id="sDuoApi" value="{{ settings.duo_api_hostname or '' }}"></div>
+<div class="fg"><label>Radius服务器</label><input id="sRadius" value="{{ settings.radius_server or '' }}"></div>
+<div class="fg"><label>Radius密钥</label><input id="sRadiusSecret" value="{{ settings.radius_secret or '' }}"></div>
+
+<h3 style="margin:16px 0 12px;font-size:14px">邮件设置</h3>
+<div class="fg"><label>SMTP服务器</label><input id="sSmtp" value="{{ settings.smtp_server or '' }}"></div>
+<div class="fg"><label>SMTP端口</label><input id="sSmtpPort" type="number" value="{{ settings.smtp_port or 587 }}"></div>
+<div class="fg"><label>SMTP用户名</label><input id="sSmtpUser" value="{{ settings.smtp_username or '' }}"></div>
+<div class="fg"><label>SMTP密码</label><input id="sSmtpPass" type="password" value="{{ settings.smtp_password or '' }}"></div>
+<div class="fg"><label>发件人邮箱</label><input id="sSmtpFrom" value="{{ settings.smtp_from_email or '' }}"></div>
+
+<h3 style="margin:16px 0 12px;font-size:14px">认证设置</h3>
+<div class="fg"><label>SSO客户端域名</label><input id="sSsoDomain" value="{{ settings.sso_client_domain or '' }}"></div>
+<div class="fg"><label>DH参数位数</label><select id="sDhBits">
+<option value="1536" {{'selected' if settings.dh_param_bits==1536}}>1536</option>
+<option value="2048" {{'selected' if settings.dh_param_bits==2048}}>2048</option>
+<option value="4096" {{'selected' if settings.dh_param_bits==4096}}>4096</option></select></div>
+
+<button class="btn btn-p" onclick="saveSettings()">保存设置</button>
+</div></div>
+<script>
+function saveSettings(){var d={server_name:document.getElementById('sName').value,theme:document.getElementById('sTheme').value,auto_update:document.getElementById('sUpdate').value=='true',lets_encrypt_domain:document.getElementById('sLeDomain').value,sso:document.getElementById('sSso').value,sso_org:document.getElementById('sSsoOrg').value,saml_sso_url:document.getElementById('sSamlUrl').value,saml_issuer:document.getElementById('sSamlIssuer').value,saml_certificate:document.getElementById('sSamlCert').value,duo_ikey:document.getElementById('sDuoIkey').value,duo_skey:document.getElementById('sDuoSkey').value,duo_api_hostname:document.getElementById('sDuoApi').value,radius_server:document.getElementById('sRadius').value,radius_secret:document.getElementById('sRadiusSecret').value,smtp_server:document.getElementById('sSmtp').value,smtp_port:parseInt(document.getElementById('sSmtpPort').value),smtp_username:document.getElementById('sSmtpUser').value,smtp_password:document.getElementById('sSmtpPass').value,smtp_from_email:document.getElementById('sSmtpFrom').value,sso_client_domain:document.getElementById('sSsoDomain').value,dh_param_bits:parseInt(document.getElementById('sDhBits').value)};api('PUT','/api/settings',d,function(r){if(r.error)toast(r.error,'r');else toast('保存成功')})}
+</script>'''
+    return R(tpl, p='cfg', settings=settings)
+
+# ====== API路由 ======
+@app.route('/api/org', methods=['POST'])
+@login_req
+def api_org_c():
+    d = request.get_json(silent=True) or {}
+    r = api.post('/organization', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'创建失败'}), (200 if r and r.status_code==200 else 400)
+
+@app.route('/api/org/<oid>', methods=['PUT'])
+@login_req
+def api_org_u(oid):
+    d = request.get_json(silent=True) or {}
+    r = api.put(f'/organization/{oid}', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'更新失败'}), (200 if r and r.status_code==200 else 400)
+
+@app.route('/api/org/<oid>', methods=['DELETE'])
+@login_req
+def api_org_d(oid):
+    return jsonify({'ok': api_del(f'/organization/{oid}')})
+
+@app.route('/api/usr/<oid>', methods=['POST'])
+@login_req
+def api_usr_c(oid):
+    d = request.get_json(silent=True) or {}
+    r = api.post(f'/user/{oid}', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'创建失败'}), (200 if r and r.status_code==200 else 400)
+
+@app.route('/api/usr/<oid>/<uid>', methods=['PUT'])
+@login_req
+def api_usr_u(oid, uid):
+    d = request.get_json(silent=True) or {}
+    r = api.put(f'/user/{oid}/{uid}', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'更新失败'}), (200 if r and r.status_code==200 else 400)
+
+@app.route('/api/usr/<oid>/<uid>', methods=['DELETE'])
+@login_req
+def api_usr_d(oid, uid):
+    return jsonify({'ok': api_del(f'/user/{oid}/{uid}')})
+
+@app.route('/api/usr/<oid>/<uid>/otp', methods=['PUT'])
+@login_req
+def api_usr_reset_otp(oid, uid):
+    r = api.put(f'/user/{oid}/{uid}/otp_secret')
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'重置失败'})
+
+@app.route('/api/usr/<oid>/<uid>/device/<did>', methods=['DELETE'])
+@login_req
+def api_usr_device_d(oid, uid, did):
+    return jsonify({'ok': api_del(f'/user/{oid}/{uid}/device/{did}')})
+
+@app.route('/api/sv', methods=['POST'])
+@login_req
+def api_sv_c():
+    d = request.get_json(silent=True) or {}
+    r = api.post('/server', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'创建失败'}), (200 if r and r.status_code==200 else 400)
+
+@app.route('/api/sv/<sid>', methods=['PUT'])
+@login_req
+def api_sv_u(sid):
+    d = request.get_json(silent=True) or {}
+    r = api.put(f'/server/{sid}', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'更新失败'}), (200 if r and r.status_code==200 else 400)
+
+@app.route('/api/sv/<sid>', methods=['DELETE'])
+@login_req
+def api_sv_d(sid):
+    return jsonify({'ok': api_del(f'/server/{sid}')})
+
+@app.route('/api/sv/<sid>/start', methods=['PUT'])
+@login_req
+def api_sv_start(sid):
+    return jsonify(api_put(f'/server/{sid}/start') or {'error':'启动失败'})
+
+@app.route('/api/sv/<sid>/stop', methods=['PUT'])
+@login_req
+def api_sv_stop(sid):
+    return jsonify(api_put(f'/server/{sid}/stop') or {'error':'停止失败'})
+
+@app.route('/api/sv/<sid>/restart', methods=['PUT'])
+@login_req
+def api_sv_restart(sid):
+    return jsonify(api_put(f'/server/{sid}/restart') or {'error':'重启失败'})
+
+@app.route('/api/sv/<sid>/rt', methods=['POST'])
+@login_req
+def api_rt_c(sid):
+    d = request.get_json(silent=True) or {}
+    r = api.post(f'/server/{sid}/route', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'添加失败'})
+
+@app.route('/api/sv/<sid>/rt/<path:net>', methods=['DELETE'])
+@login_req
+def api_rt_d(sid, net):
+    return jsonify({'ok': api_del(f'/server/{sid}/route/{net}')})
+
+@app.route('/api/sv/<sid>/org/<oid>', methods=['PUT'])
+@login_req
+def api_org_attach(sid, oid):
+    return jsonify(api_put(f'/server/{sid}/organization/{oid}') or {'error':'关联失败'})
+
+@app.route('/api/sv/<sid>/org/<oid>', methods=['DELETE'])
+@login_req
+def api_org_detach(sid, oid):
+    return jsonify({'ok': api_del(f'/server/{sid}/organization/{oid}')})
+
+@app.route('/api/sv/<sid>/output', methods=['DELETE'])
+@login_req
+def api_sv_output_d(sid):
+    return jsonify({'ok': api_del(f'/server/{sid}/output')})
+
 @app.route('/api/sv/<sid>/bw/<period>')
 @login_req
 def api_sv_bw(sid, period):
-    r = api.get(f'/server/{sid}/bandwidth/{period}')
-    return r.json() if r.status_code == 200 else jsonify([])
+    return jsonify(api_get(f'/server/{sid}/bandwidth/{period}'))
 
-# ====== Host API ======
 @app.route('/api/host/<hid>', methods=['GET','PUT'])
 @login_req
 def api_host(hid):
-    if request.method == 'GET':
-        r = api.get(f'/host/{hid}')
-        return r.json() if r.status_code == 200 else jsonify({})
-    r = api.put(f'/host/{hid}', request.json)
-    return r.json() if r.status_code == 200 else jsonify({'error': r.text}), r.status_code
+    if request.method == 'PUT':
+        d = request.get_json(silent=True) or {}
+        r = api.put(f'/host/{hid}', d)
+        return jsonify(r.json() if r and r.status_code==200 else {'error':'更新失败'})
+    return jsonify(api_get(f'/host/{hid}'))
 
 @app.route('/api/sv/<sid>/host/<hid>', methods=['PUT'])
 @login_req
 def api_host_attach(sid, hid):
-    r = api.put(f'/server/{sid}/host/{hid}')
-    return r.json() if r.status_code == 200 else jsonify({'error': r.text}), r.status_code
+    return jsonify(api_put(f'/server/{sid}/host/{hid}') or {'error':'关联失败'})
 
 @app.route('/api/sv/<sid>/host/<hid>', methods=['DELETE'])
 @login_req
 def api_host_detach(sid, hid):
-    return jsonify({'ok': api.delete(f'/server/{sid}/host/{hid}').status_code == 200})
+    return jsonify({'ok': api_del(f'/server/{sid}/host/{hid}')})
 
-# ====== Link API ======
 @app.route('/api/link', methods=['POST'])
 @login_req
 def api_link_c():
-    r = api.post('/link', request.json)
-    return r.json() if r.status_code == 200 else jsonify({'error': r.text}), r.status_code
+    d = request.get_json(silent=True) or {}
+    r = api.post('/link', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'创建失败'})
 
 @app.route('/api/link/<lid>', methods=['GET','PUT','DELETE'])
 @login_req
 def api_link(lid):
     if request.method == 'GET':
-        r = api.get(f'/link/{lid}')
-        return r.json() if r.status_code == 200 else jsonify({})
+        return jsonify(api_get(f'/link/{lid}'))
     elif request.method == 'PUT':
-        r = api.put(f'/link/{lid}', request.json)
-        return r.json() if r.status_code == 200 else jsonify({'error': r.text}), r.status_code
-    return jsonify({'ok': api.delete(f'/link/{lid}').status_code == 200})
+        d = request.get_json(silent=True) or {}
+        r = api.put(f'/link/{lid}', d)
+        return jsonify(r.json() if r and r.status_code==200 else {'error':'更新失败'})
+    return jsonify({'ok': api_del(f'/link/{lid}')})
 
-# ====== Device API ======
+@app.route('/api/link/<lid>/location', methods=['GET','POST'])
+@login_req
+def api_link_locs(lid):
+    if request.method == 'GET':
+        return jsonify(api_get(f'/link/{lid}/location'))
+    d = request.get_json(silent=True) or {}
+    r = api.post(f'/link/{lid}/location', d)
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'创建失败'})
+
+@app.route('/api/link/<lid>/location/<locid>', methods=['PUT','DELETE'])
+@login_req
+def api_link_loc(lid, locid):
+    if request.method == 'PUT':
+        d = request.get_json(silent=True) or {}
+        r = api.put(f'/link/{lid}/location/{locid}', d)
+        return jsonify(r.json() if r and r.status_code==200 else {'error':'更新失败'})
+    return jsonify({'ok': api_del(f'/link/{lid}/location/{locid}')})
+
 @app.route('/api/device/<oid>/<uid>/<did>', methods=['DELETE'])
 @login_req
 def api_device_d(oid, uid, did):
-    return jsonify({'ok': api.delete(f'/user/{oid}/{uid}/device/{did}').status_code == 200})
+    return jsonify({'ok': api_del(f'/user/{oid}/{uid}/device/{did}')})
 
-if __name__=='__main__':
+@app.route('/api/settings', methods=['GET','PUT'])
+@login_req
+def api_settings():
+    if request.method == 'PUT':
+        d = request.get_json(silent=True) or {}
+        r = api.put('/settings', d)
+        return jsonify(r.json() if r and r.status_code==200 else {'error':'保存失败'})
+    return jsonify(api_get('/settings'))
+
+@app.route('/api/admin', methods=['GET','POST'])
+@login_req
+def api_admin_list():
+    if request.method == 'POST':
+        d = request.get_json(silent=True) or {}
+        r = api.post('/admin', d)
+        return jsonify(r.json() if r and r.status_code==200 else {'error':'添加失败'})
+    return jsonify(api_get('/admin'))
+
+@app.route('/api/admin/<aid>', methods=['DELETE'])
+@login_req
+def api_admin_del(aid):
+    return jsonify({'ok': api_del(f'/admin/{aid}')})
+
+@app.route('/api/org/<oid>/email', methods=['POST'])
+@login_req
+def api_org_email(oid):
+    r = api.post(f'/organization/{oid}/email')
+    return jsonify(r.json() if r and r.status_code==200 else {'error':'发送失败'})
+
+@app.route('/api/log/<lid>', methods=['DELETE'])
+@login_req
+def api_log_d(lid):
+    return jsonify({'ok': api_del(f'/log/{lid}')})
+
+# ====== 密钥下载 ======
+@app.route('/data/<oid>/<uid>.tar')
+@login_req
+def dl_profile_tar(oid, uid):
+    r = api.get(f'/data/{oid}/{uid}.tar')
+    if r.status_code == 200:
+        return send_file(io.BytesIO(r.content), mimetype='application/x-tar', as_attachment=True, download_name=f'{uid}.tar')
+    return '下载失败', 404
+
+@app.route('/data/<oid>/<uid>.zip')
+@login_req
+def dl_profile_zip(oid, uid):
+    r = api.get(f'/data/{oid}/{uid}.zip')
+    if r.status_code == 200:
+        return send_file(io.BytesIO(r.content), mimetype='application/zip', as_attachment=True, download_name=f'{uid}.zip')
+    return '下载失败', 404
+
+@app.route('/data/<oid>/<uid>.onc')
+@login_req
+def dl_profile_onc(oid, uid):
+    r = api.get(f'/data/{oid}/{uid}.onc')
+    if r.status_code == 200:
+        return send_file(io.BytesIO(r.content), mimetype='application/json', as_attachment=True, download_name=f'{uid}.onc')
+    return '下载失败', 404
+
+# ====== 状态/事件 ======
+@app.route('/status')
+@login_req
+def status_page():
+    status = api_get('/status')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>系统状态</h2></div>
+<div class="card-bd">
+<pre style="font-size:12px;background:#f8f9fa;padding:12px;border-radius:4px">{{ status|tojson(indent=2) }}</pre>
+</div></div>'''
+    return R(tpl, p='cfg', status=status)
+
+@app.route('/events')
+@login_req
+def events_page():
+    events = api_get('/event')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>事件通知</h2></div>
+<div class="card-bd"><table><tr><th>时间</th><th>类型</th><th>详情</th></tr>
+{% for e in events %}<tr>
+<td>{{ e.timestamp }}</td>
+<td>{{ e.type }}</td>
+<td>{{ e.message or '-' }}</td>
+</tr>{% endfor %}
+{% if not events %}<tr><td colspan="3" class="empty">暂无事件</td></tr>{% endif %}
+</table></div></div>'''
+    return R(tpl, p='cfg', events=events)
+
+# ====== 订阅管理 ======
+@app.route('/subscription')
+@login_req
+def subscription_page():
+    sub = api_get('/subscription')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>订阅管理</h2></div>
+<div class="card-bd">
+<pre style="font-size:12px;background:#f8f9fa;padding:12px;border-radius:4px">{{ sub|tojson(indent=2) if sub else '无订阅信息' }}</pre>
+</div></div>'''
+    return R(tpl, p='cfg', sub=sub)
+
+# ====== Ping ======
+@app.route('/ping')
+def ping():
+    r = api.get('/ping')
+    return jsonify(r.json() if r.status_code==200 else {'error': 'unavailable'})
+
+# ====== 服务器输出 ======
+@app.route('/sv/<sid>/output')
+@login_req
+def sv_output(sid):
+    sv = api_get(f'/server/{sid}')
+    output = api_get(f'/server/{sid}/output')
+    link_output = api_get(f'/server/{sid}/link_output')
+    tpl = '''
+<div class="card"><div class="card-hd"><h2>{{ sv.name }} - 服务器输出</h2>
+<div class="btns">
+<button class="btn btn-d" onclick="api('DELETE','/api/sv/{{ sid }}/output',null,function(){location.reload()})">清空日志</button>
+</div></div>
+<div class="card-bd">
+<h3 style="margin-bottom:8px;font-size:13px">服务器日志</h3>
+<pre style="max-height:400px;overflow:auto;font-size:12px;background:#f8f9fa;padding:12px;border-radius:4px">{{ output|join('\\n') if output else '暂无日志' }}</pre>
+{% if link_output %}
+<h3 style="margin:16px 0 8px;font-size:13px">链接输出</h3>
+<pre style="max-height:200px;overflow:auto;font-size:12px;background:#f8f9fa;padding:12px;border-radius:4px">{{ link_output|join('\\n') }}</pre>
+{% endif %}
+</div></div>'''
+    return R(tpl, p='s', sid=sid, sv=sv, output=output, link_output=link_output)
+
+# ====== 启动 ======
+if __name__ == '__main__':
     app.run(host='0.0.0.0', port=LISTEN_PORT, debug=False)
