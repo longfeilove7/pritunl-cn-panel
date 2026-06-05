@@ -281,7 +281,7 @@ body{background:linear-gradient(135deg,#667eea,#764ba2);min-height:100vh;display
 function sso(provider){window.location.href='/sso/request?provider='+provider}
 function go(){var u=document.getElementById('u').value,p=document.getElementById('p').value;if(!u||!p){document.getElementById('e').textContent='请输入用户名和密码';document.getElementById('e').style.display='block';return}
 var x=new XMLHttpRequest();x.open('POST','/login');x.setRequestHeader('Content-Type','application/json');
-x.onload=function(){var d=JSON.parse(x.responseText);if(d.success){if(d.default){document.getElementById('defaultAlert').classList.add('show')}if(d.tf_needed){document.getElementById('loginForm').style.display='none';document.getElementById('tfForm').style.display='block'}else{location.href='/'}}else{document.getElementById('e').textContent=d.error||'登录失败';document.getElementById('e').style.display='block'}}};
+x.onload=function(){var d=JSON.parse(x.responseText);if(d.success){if(d.default){document.getElementById('defaultAlert').classList.add('show')}if(d.tf_needed){document.getElementById('loginForm').style.display='none';document.getElementById('tfForm').style.display='block'}else{location.href='/'}}else{document.getElementById('e').textContent=d.error||'登录失败';document.getElementById('e').style.display='block'}};
 x.send(JSON.stringify({username:u,password:p}))}
 function tfGo(){var otp=document.getElementById('otp').value;if(!otp){document.getElementById('tfErr').textContent='请输入验证码';document.getElementById('tfErr').style.display='block';return}
 var x=new XMLHttpRequest();x.open('POST','/login/tf');x.setRequestHeader('Content-Type','application/json');
