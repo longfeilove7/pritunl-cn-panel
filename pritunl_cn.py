@@ -285,7 +285,7 @@ x.onload=function(){var d=JSON.parse(x.responseText);if(d.success){if(d.default)
 x.send(JSON.stringify({username:u,password:p}))}
 function tfGo(){var otp=document.getElementById('otp').value;if(!otp){document.getElementById('tfErr').textContent='请输入验证码';document.getElementById('tfErr').style.display='block';return}
 var x=new XMLHttpRequest();x.open('POST','/login/tf');x.setRequestHeader('Content-Type','application/json');
-x.onload=function(){var d=JSON.parse(x.responseText);if(d.success)location.href='/';else{document.getElementById('tfErr').textContent=d.error||'验证失败';document.getElementById('tfErr').style.display='block'}}};
+x.onload=function(){var d=JSON.parse(x.responseText);if(d.success)location.href='/';else{document.getElementById('tfErr').textContent=d.error||'验证失败';document.getElementById('tfErr').style.display='block'}};
 x.send(JSON.stringify({code:otp}))}</script></body></html>'''
 
 @app.route('/login/tf', methods=['POST'])
