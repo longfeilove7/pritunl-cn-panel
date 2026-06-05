@@ -24,7 +24,7 @@ if [ "$1" = "rollback" ]; then
 fi
 
 # 检查是否已打补丁
-if grep -q "urllib.parse.quote" "$KEY_FILE" 2>/dev/null; then
+if grep -q "filename\*=UTF-8" "$KEY_FILE" 2>/dev/null; then
     echo "补丁已应用，跳过"
     exit 0
 fi
