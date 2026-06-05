@@ -19,7 +19,7 @@ LISTEN_PORT = 8443
 # ====== API Client ======
 class PritunlAPI:
     def login(self, username, password):
-        """验证用户名密码，只保存凭据不保存session"""
+        """验证用户名密码，保存session信息"""
         s = requests.Session()
         s.verify = False
         resp = s.post(f'{PRITUNL_URL}/auth/session',
@@ -27,39 +27,71 @@ class PritunlAPI:
         data = resp.json()
         if not data.get('authenticated'):
             return False, data.get('error_msg', '登录失败'), False
+        # 保存凭据和session信息
         session['pritunl_user'] = username
         session['pritunl_pass'] = password
+        # 保存cookie
+        cookies = {}
+        for c in s.cookies:
+            cookies[c.name] = c.value
+        session['pritunl_cookies'] = cookies
+        # 获取CSRF token
+        state_resp = s.get(f'{PRITUNL_URL}/state')
+        if state_resp.status_code == 200:
+            session['pritunl_csrf'] = state_resp.json().get('csrf_token', '')
         tf = bool(data.get('tf_enabled')) or bool(data.get('tf_mode'))
         return True, data.get('default', False), tf
 
-    def _get_session(self):
-        """每次请求重新登录获取新session"""
+    def _make_session(self):
+        """创建session并加载保存的cookie"""
+        s = requests.Session()
+        s.verify = False
+        cookies = session.get('pritunl_cookies', {})
+        for name, value in cookies.items():
+            s.cookies.set(name, value, domain='127.0.0.1', path='/')
+        return s
+
+    def _refresh_session(self):
+        """重新登录获取新session（仅在session过期时调用）"""
         username = session.get('pritunl_user', '')
         password = session.get('pritunl_pass', '')
         if not username or not password:
-            return None, None
+            return False
         s = requests.Session()
         s.verify = False
         resp = s.post(f'{PRITUNL_URL}/auth/session',
             json={'username': username, 'password': password})
         data = resp.json()
         if not data.get('authenticated'):
-            return None, None
+            return False
+        # 更新cookie
+        cookies = {}
+        for c in s.cookies:
+            cookies[c.name] = c.value
+        session['pritunl_cookies'] = cookies
+        # 更新CSRF token
         state_resp = s.get(f'{PRITUNL_URL}/state')
-        csrf = ''
         if state_resp.status_code == 200:
-            csrf = state_resp.json().get('csrf_token', '')
-        return s, csrf
+            session['pritunl_csrf'] = state_resp.json().get('csrf_token', '')
+        return True
 
     def req(self, method, path, data=None):
-        s, csrf = self._get_session()
-        if not s:
-            return type('obj', (object,), {'status_code': 401, 'json': lambda: {'error': 'not authenticated'}})()
+        s = self._make_session()
+        csrf = session.get('pritunl_csrf', '')
         h = {'Content-Type': 'application/json', 'PR-Validated': 'true'}
         if csrf:
             h['Csrf-Token'] = csrf
         url = f'{PRITUNL_URL}{path}'
         r = s.request(method, url, headers=h, json=data)
+        # 如果401，尝试重新登录
+        if r.status_code == 401:
+            if self._refresh_session():
+                s = self._make_session()
+                csrf = session.get('pritunl_csrf', '')
+                h = {'Content-Type': 'application/json', 'PR-Validated': 'true'}
+                if csrf:
+                    h['Csrf-Token'] = csrf
+                r = s.request(method, url, headers=h, json=data)
         return r
 
     def get(self, p): return self.req('GET', p)
@@ -262,9 +294,8 @@ def login_tf():
     code = d.get('code', '')
     if not code:
         return jsonify({'success': False, 'error': '请输入验证码'}), 400
-    s, csrf = api._get_session()
-    if not s:
-        return jsonify({'success': False, 'error': '会话已过期，请重新登录'}), 401
+    s = api._make_session()
+    csrf = session.get('pritunl_csrf', '')
     h = {'Content-Type': 'application/json', 'PR-Validated': 'true'}
     if csrf:
         h['Csrf-Token'] = csrf
