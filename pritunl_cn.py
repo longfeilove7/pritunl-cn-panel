@@ -85,6 +85,13 @@ def api_del(path):
     r = api.delete(path)
     return r.status_code == 200
 
+def oid(obj):
+    """Get ID from object, handling both 'id' and '_id' fields"""
+    if isinstance(obj, dict):
+        return obj.get('id') or obj.get('_id') or ''
+    return obj
+
+
 # ====== HTML模板 ======
 BASE = '''<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VPN管理系统</title>
@@ -309,7 +316,7 @@ def dash():
     orgs = api_get('/organization')
     total_users = 0
     for o in orgs:
-        users = api_get(f'/user/{o["_id"]}')
+        users = api_get(f'/user/{oid(o)}')
         total_users += len(users)
     running = sum(1 for s in servers if s.get('status') == 'running')
     tpl = '''
@@ -324,7 +331,7 @@ def dash():
 {% for s in servers %}<tr>
 <td><b>{{ s.name }}</b></td><td>{{ s.port }}</td><td>{{ s.protocol }}</td><td>{{ s.network }}</td>
 <td><span class="tag {{'tag-g' if s.status=='running' else 'tag-r'}}">{{ '运行中' if s.status=='running' else '已停止' }}</span></td>
-<td><a href="/sv/{{ s._id }}" class="btn btn-s">详情</a></td>
+<td><a href="/sv/{{ oid(s) }}" class="btn btn-s">详情</a></td>
 </tr>{% endfor %}
 {% if not servers %}<tr><td colspan="6" class="empty">暂无服务器</td></tr>{% endif %}
 </table></div></div>'''
@@ -343,11 +350,11 @@ def sv_page():
 {% for s in servers %}<tr>
 <td><b>{{ s.name }}</b></td><td>{{ s.port }}</td><td>{{ s.protocol }}</td><td>{{ s.network }}</td><td>{{ s.dns_server or '-' }}</td>
 <td><span class="tag {{'tag-g' if s.status=='running' else 'tag-r'}}">{{ '运行中' if s.status=='running' else '已停止' }}</span></td>
-<td class="btns"><a href="/sv/{{ s._id }}" class="btn btn-s">详情</a>
-{% if s.status=='running' %}<button class="btn btn-s btn-d" onclick="svCmd('{{ s._id }}','stop')">停止</button>
-<button class="btn btn-s" onclick="svCmd('{{ s._id }}','restart')">重启</button>
-{% else %}<button class="btn btn-s btn-g" onclick="svCmd('{{ s._id }}','start')">启动</button>{% endif %}
-<button class="btn btn-s btn-d" onclick="cd('{{ s.name }}',function(){api('DELETE','/api/sv/{{ s._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button>
+<td class="btns"><a href="/sv/{{ oid(s) }}" class="btn btn-s">详情</a>
+{% if s.status=='running' %}<button class="btn btn-s btn-d" onclick="svCmd('{{ oid(s) }}','stop')">停止</button>
+<button class="btn btn-s" onclick="svCmd('{{ oid(s) }}','restart')">重启</button>
+{% else %}<button class="btn btn-s btn-g" onclick="svCmd('{{ oid(s) }}','start')">启动</button>{% endif %}
+<button class="btn btn-s btn-d" onclick="cd('{{ s.name }}',function(){api('DELETE','/api/sv/{{ oid(s) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button>
 </td></tr>{% endfor %}
 {% if not servers %}<tr><td colspan="7" class="empty">暂无服务器</td></tr>{% endif %}
 </table></div></div>
@@ -361,7 +368,7 @@ def sv_page():
 <button class="btn btn-p" onclick="svCreate()">创建</button></div></div></div>
 <script>
 function svCmd(id,cmd){api('PUT','/api/sv/'+id+'/'+cmd,null,function(r){if(r.error)toast(r.error,'r');else{toast('操作成功');setTimeout(function(){location.reload()},500)}})}
-function svCreate(){api('POST','/api/sv',{name:document.getElementById('aName').value,port:parseInt(document.getElementById('aPort').value),protocol:document.getElementById('aProto').value,network:document.getElementById('aNet').value,dns_server:document.getElementById('aDns').value},function(r){if(r&&r._id){toast('创建成功');location.reload()}else toast('创建失败','r')})}
+function svCreate(){api('POST','/api/sv',{name:document.getElementById('aName').value,port:parseInt(document.getElementById('aPort').value),protocol:document.getElementById('aProto').value,network:document.getElementById('aNet').value,dns_server:document.getElementById('aDns').value},function(r){if(r&&(r.id||(r.id||r._id))){toast('创建成功');location.reload()}else toast('创建失败','r')})}
 </script>'''
     return R(tpl, p='s', servers=servers, orgs=orgs)
 
@@ -459,11 +466,11 @@ def sv_detail(sid):
 <div class="card"><div class="card-hd"><h2>关联组织</h2></div>
 <div class="card-bd"><table><tr><th>组织</th><th>状态</th><th>操作</th></tr>
 {% for o in orgs %}<tr><td>{{ o.name }}</td>
-<td>{% if o._id in attached_ids %}<span class="tag tag-g">已关联</span>{% else %}<span class="tag tag-gray">未关联</span>{% endif %}</td>
-<td>{% if o._id in attached_ids %}
-<button class="btn btn-s btn-d" onclick="api('DELETE','/api/sv/{{ sid }}/org/{{ o._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">解除关联</button>
+<td>{% if oid(o) in attached_ids %}<span class="tag tag-g">已关联</span>{% else %}<span class="tag tag-gray">未关联</span>{% endif %}</td>
+<td>{% if oid(o) in attached_ids %}
+<button class="btn btn-s btn-d" onclick="api('DELETE','/api/sv/{{ sid }}/org/{{ oid(o) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">解除关联</button>
 {% else %}
-<button class="btn btn-s btn-g" onclick="api('PUT','/api/sv/{{ sid }}/org/{{ o._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">关联</button>
+<button class="btn btn-s btn-g" onclick="api('PUT','/api/sv/{{ sid }}/org/{{ oid(o) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">关联</button>
 {% endif %}</td></tr>{% endfor %}
 </table></div></div>
 
@@ -500,19 +507,19 @@ def orgs_page():
 <button class="btn btn-p" onclick="mo('mOrg')">+ 创建组织</button></div>
 <div class="card-bd"><table><tr><th>名称</th><th>用户数</th><th>操作</th></tr>
 {% for o in orgs %}<tr>
-<td><a href="/org/{{ o._id }}"><b>{{ o.name }}</b></a></td>
+<td><a href="/org/{{ oid(o) }}"><b>{{ o.name }}</b></a></td>
 <td>{{ o.user_count or '-' }}</td>
-<td class="btns"><a href="/org/{{ o._id }}" class="btn btn-s">用户</a>
-<a href="/org/{{ o._id }}/bulk" class="btn btn-s">批量添加</a>
-<a href="/org/{{ o._id }}/email" class="btn btn-s">发邮件</a>
-<button class="btn btn-s btn-d" onclick="cd('{{ o.name }}',function(){api('DELETE','/api/org/{{ o._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+<td class="btns"><a href="/org/{{ oid(o) }}" class="btn btn-s">用户</a>
+<a href="/org/{{ oid(o) }}/bulk" class="btn btn-s">批量添加</a>
+<a href="/org/{{ oid(o) }}/email" class="btn btn-s">发邮件</a>
+<button class="btn btn-s btn-d" onclick="cd('{{ o.name }}',function(){api('DELETE','/api/org/{{ oid(o) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
 </tr>{% endfor %}
 {% if not orgs %}<tr><td colspan="3" class="empty">暂无组织</td></tr>{% endif %}
 </table></div></div>
 <div class="mo" id="mOrg"><div class="md"><div class="md-hd"><h3>创建组织</h3><button class="md-x" onclick="mc('mOrg')">×</button></div>
 <div class="md-bd"><div class="fg"><label>名称</label><input id="oName"></div></div>
 <div class="md-ft"><button class="btn" onclick="mc('mOrg')">取消</button>
-<button class="btn btn-p" onclick="api('POST','/api/org',{name:document.getElementById('oName').value},function(r){if(r&&r._id){toast('创建成功');location.reload()}else toast('创建失败','r')})">创建</button></div></div></div>'''
+<button class="btn btn-p" onclick="api('POST','/api/org',{name:document.getElementById('oName').value},function(r){if(r&&(r.id||(r.id||r._id))){toast('创建成功');location.reload()}else toast('创建失败','r')})">创建</button></div></div></div>'''
     return R(tpl, p='o', orgs=orgs)
 
 # ====== 组织用户 ======
@@ -528,12 +535,12 @@ def org_users(oid):
 <button class="btn btn-p" onclick="mo('mUsr')">+ 添加用户</button></div></div>
 <div class="card-bd"><table><tr><th>用户名</th><th>邮箱</th><th>状态</th><th>操作</th></tr>
 {% for u in users %}<tr>
-<td><a href="/usr/{{ oid }}/{{ u._id }}"><b>{{ u.name }}</b></a></td>
+<td><a href="/usr/{{ oid }}/{{ oid(u) }}"><b>{{ u.name }}</b></a></td>
 <td>{{ u.email or '-' }}</td>
 <td><span class="tag {{'tag-g' if not u.disabled else 'tag-r'}}">{{ '正常' if not u.disabled else '已禁用' }}</span></td>
-<td class="btns"><a href="/usr/{{ oid }}/{{ u._id }}" class="btn btn-s">详情</a>
-<button class="btn btn-s {{'tag-r' if not u.disabled else 'tag-g'}}" onclick="api('PUT','/api/usr/{{ oid }}/{{ u._id }}',{disabled:{{ 'true' if not u.disabled else 'false' }}},function(r){if(r.error)toast(r.error,'r');else location.reload()})">{{ '禁用' if not u.disabled else '启用' }}</button>
-<button class="btn btn-s btn-d" onclick="cd('{{ u.name }}',function(){api('DELETE','/api/usr/{{ oid }}/{{ u._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+<td class="btns"><a href="/usr/{{ oid }}/{{ oid(u) }}" class="btn btn-s">详情</a>
+<button class="btn btn-s {{'tag-r' if not u.disabled else 'tag-g'}}" onclick="api('PUT','/api/usr/{{ oid }}/{{ oid(u) }}',{disabled:{{ 'true' if not u.disabled else 'false' }}},function(r){if(r.error)toast(r.error,'r');else location.reload()})">{{ '禁用' if not u.disabled else '启用' }}</button>
+<button class="btn btn-s btn-d" onclick="cd('{{ u.name }}',function(){api('DELETE','/api/usr/{{ oid }}/{{ oid(u) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
 </tr>{% endfor %}
 {% if not users %}<tr><td colspan="4" class="empty">暂无用户</td></tr>{% endif %}
 </table></div></div>
@@ -542,7 +549,7 @@ def org_users(oid):
 <div class="fg"><label>邮箱</label><input id="uEmail"></div>
 <div class="fg"><label>PIN</label><input id="uPin" placeholder="可选"></div></div>
 <div class="md-ft"><button class="btn" onclick="mc('mUsr')">取消</button>
-<button class="btn btn-p" onclick="api('POST','/api/usr/{{ oid }}',{name:document.getElementById('uName').value,email:document.getElementById('uEmail').value,pin:document.getElementById('uPin').value||null},function(r){if(r&&r._id){toast('添加成功');location.reload()}else toast('添加失败','r')})">添加</button></div></div></div>'''
+<button class="btn btn-p" onclick="api('POST','/api/usr/{{ oid }}',{name:document.getElementById('uName').value,email:document.getElementById('uEmail').value,pin:document.getElementById('uPin').value||null},function(r){if(r&&(r.id||(r.id||r._id))){toast('添加成功');location.reload()}else toast('添加失败','r')})">添加</button></div></div></div>'''
     return R(tpl, p='o', oid=oid, org=org, users=users)
 
 # ====== 用户列表 ======
@@ -552,7 +559,7 @@ def users_all():
     orgs = api_get('/organization')
     all_users = []
     for o in orgs:
-        users = api_get(f'/user/{o["_id"]}')
+        users = api_get(f'/user/{oid(o)}')
         for u in users:
             u['_org_name'] = o.get('name','')
             u['_org_id'] = o['_id']
@@ -561,11 +568,11 @@ def users_all():
 <div class="card"><div class="card-hd"><h2>全部用户</h2></div>
 <div class="card-bd"><table><tr><th>用户名</th><th>组织</th><th>邮箱</th><th>状态</th><th>操作</th></tr>
 {% for u in users %}<tr>
-<td><a href="/usr/{{ u._org_id }}/{{ u._id }}"><b>{{ u.name }}</b></a></td>
+<td><a href="/usr/{{ u._org_id }}/{{ oid(u) }}"><b>{{ u.name }}</b></a></td>
 <td>{{ u._org_name }}</td>
 <td>{{ u.email or '-' }}</td>
 <td><span class="tag {{'tag-g' if not u.disabled else 'tag-r'}}">{{ '正常' if not u.disabled else '已禁用' }}</span></td>
-<td><a href="/usr/{{ u._org_id }}/{{ u._id }}" class="btn btn-s">详情</a></td>
+<td><a href="/usr/{{ u._org_id }}/{{ oid(u) }}" class="btn btn-s">详情</a></td>
 </tr>{% endfor %}
 {% if not users %}<tr><td colspan="5" class="empty">暂无用户</td></tr>{% endif %}
 </table></div></div>'''
@@ -582,7 +589,7 @@ def user_detail(oid, uid):
     keys_info = {}
     for s in servers:
         try:
-            r = api.get(f'/key/{oid}/{uid}/{s["_id"]}.key')
+            r = api.get(f'/key/{oid}/{uid}/{oid(s)}.key')
             if r.status_code == 200:
                 keys_info[s['_id']] = r.text[:200]
         except:
@@ -618,7 +625,7 @@ def user_detail(oid, uid):
 <div class="card-bd"><table><tr><th>服务器</th><th>状态</th><th>操作</th></tr>
 {% for s in servers %}<tr>
 <td>{{ s.name }}</td>
-<td>{% if s._id in keys_info %}<span class="tag tag-g">已配置</span>{% else %}<span class="tag tag-gray">未配置</span>{% endif %}</td>
+<td>{% if oid(s) in keys_info %}<span class="tag tag-g">已配置</span>{% else %}<span class="tag tag-gray">未配置</span>{% endif %}</td>
 <td class="btns">
 <a href="/data/{{ oid }}/{{ uid }}.tar" class="btn btn-s">下载</a>
 </td></tr>{% endfor %}
@@ -627,10 +634,10 @@ def user_detail(oid, uid):
 <div class="card"><div class="card-hd"><h2>设备管理</h2></div>
 <div class="card-bd"><table><tr><th>设备ID</th><th>名称</th><th>平台</th><th>操作</th></tr>
 {% for d in devices %}<tr>
-<td>{{ d._id or d.id }}</td>
+<td>{{ oid(d) }}</td>
 <td>{{ d.name or '-' }}</td>
 <td>{{ d.platform or '-' }}</td>
-<td><button class="btn btn-s btn-d" onclick="cd('{{ d.name or d._id }}',function(){api('DELETE','/api/device/{{ oid }}/{{ uid }}/{{ d._id or d.id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+<td><button class="btn btn-s btn-d" onclick="cd('{{ d.name or oid(d) }}',function(){api('DELETE','/api/device/{{ oid }}/{{ uid }}/{{ oid(d) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
 </tr>{% endfor %}
 {% if not devices %}<tr><td colspan="4" class="empty">暂无设备</td></tr>{% endif %}
 </table></div></div>
@@ -674,7 +681,7 @@ def bulk_add_page(oid):
 <script>
 function bulkAdd(){var lines=document.getElementById('bulk').value.split('\\n').filter(function(l){return l.trim()});var results=[];var done=0;
 lines.forEach(function(line){var parts=line.split(',');var u={name:parts[0].trim()};if(parts[1])u.email=parts[1].trim();if(parts[2])u.pin=parts[2].trim();
-api('POST','/api/usr/{{ oid }}',u,function(r){done++;if(r&&r._id)results.push('<span class="tag tag-g">'+u.name+' ✓</span>');else results.push('<span class="tag tag-r">'+u.name+' ✗</span>');
+api('POST','/api/usr/{{ oid }}',u,function(r){done++;if(r&&(r.id||(r.id||r._id)))results.push('<span class="tag tag-g">'+u.name+' ✓</span>');else results.push('<span class="tag tag-r">'+u.name+' ✗</span>');
 if(done==lines.length)document.getElementById('bulkResult').innerHTML=results.join(' ')})})}
 </script>'''
     return R(tpl, p='o', oid=oid, org=org)
@@ -702,11 +709,11 @@ def hosts_page():
 <div class="card"><div class="card-hd"><h2>主机管理</h2></div>
 <div class="card-bd"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>可用性组</th><th>操作</th></tr>
 {% for h in hosts %}<tr>
-<td>{{ h.name or h._id }}</td>
+<td>{{ h.name or oid(h) }}</td>
 <td>{{ h.public_address or h.address or '-' }}</td>
 <td><span class="tag {{'tag-g' if h.status=='online' else 'tag-r'}}">{{ h.status or '未知' }}</span></td>
 <td>{{ h.availability_group or '-' }}</td>
-<td class="btns"><button class="btn btn-s" onclick="hostEdit('{{ h._id }}')">设置</button></td>
+<td class="btns"><button class="btn btn-s" onclick="hostEdit('{{ oid(h) }}')">设置</button></td>
 </tr>{% endfor %}
 {% if not hosts %}<tr><td colspan="5" class="empty">暂无主机</td></tr>{% endif %}
 </table></div></div>
@@ -734,17 +741,17 @@ def links_page():
 <button class="btn btn-p" onclick="mo('mLink')">+ 创建链接</button></div>
 <div class="card-bd"><table><tr><th>名称</th><th>URI ID</th><th>操作</th></tr>
 {% for l in links %}<tr>
-<td>{{ l.name or l._id }}</td>
+<td>{{ l.name or oid(l) }}</td>
 <td>{{ l.uri_id or '-' }}</td>
-<td class="btns"><button class="btn btn-s" onclick="linkEdit('{{ l._id }}')">编辑</button>
-<button class="btn btn-s btn-d" onclick="cd('{{ l.name }}',function(){api('DELETE','/api/link/{{ l._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+<td class="btns"><button class="btn btn-s" onclick="linkEdit('{{ oid(l) }}')">编辑</button>
+<button class="btn btn-s btn-d" onclick="cd('{{ l.name }}',function(){api('DELETE','/api/link/{{ oid(l) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
 </tr>{% endfor %}
 {% if not links %}<tr><td colspan="3" class="empty">暂无链接</td></tr>{% endif %}
 </table></div></div>
 <div class="mo" id="mLink"><div class="md"><div class="md-hd"><h3>创建链接</h3><button class="md-x" onclick="mc('mLink')">×</button></div>
 <div class="md-bd"><div class="fg"><label>名称</label><input id="lName"></div></div>
 <div class="md-ft"><button class="btn" onclick="mc('mLink')">取消</button>
-<button class="btn btn-p" onclick="api('POST','/api/link',{name:document.getElementById('lName').value},function(r){if(r&&r._id){toast('创建成功');location.reload()}else toast('创建失败','r')})">创建</button></div></div></div>
+<button class="btn btn-p" onclick="api('POST','/api/link',{name:document.getElementById('lName').value},function(r){if(r&&(r.id||(r.id||r._id))){toast('创建成功');location.reload()}else toast('创建失败','r')})">创建</button></div></div></div>
 <div class="mo" id="mLinkEdit"><div class="md"><div class="md-hd"><h3>编辑链接</h3><button class="md-x" onclick="mc('mLinkEdit')">×</button></div>
 <div class="md-bd"><div class="fg"><label>名称</label><input id="leName"></div></div>
 <div class="md-ft"><button class="btn" onclick="mc('mLinkEdit')">取消</button>
@@ -762,9 +769,9 @@ def devices_page():
     orgs = api_get('/organization')
     all_devices = []
     for o in orgs:
-        users = api_get(f'/user/{o["_id"]}')
+        users = api_get(f'/user/{oid(o)}')
         for u in users:
-            devices = api_get(f'/user/{o["_id"]}/{u["_id"]}/device')
+            devices = api_get(f'/user/{oid(o)}/{oid(u)}/device')
             for d in devices:
                 d['_org'] = o.get('name','')
                 d['_user'] = u.get('name','')
@@ -776,12 +783,12 @@ def devices_page():
 <div class="card"><div class="card-hd"><h2>设备管理</h2></div>
 <div class="card-bd"><table><tr><th>设备ID</th><th>名称</th><th>平台</th><th>用户</th><th>组织</th><th>操作</th></tr>
 {% for d in devices %}<tr>
-<td>{{ d._id or d.id }}</td>
+<td>{{ oid(d) }}</td>
 <td>{{ d.name or '-' }}</td>
 <td>{{ d.platform or '-' }}</td>
 <td>{{ d._user }}</td>
 <td>{{ d._org }}</td>
-<td><button class="btn btn-s btn-d" onclick="cd('{{ d.name or d._id }}',function(){api('DELETE','/api/device/{{ d._org_id }}/{{ d._user_id }}/{{ d._id or d.id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+<td><button class="btn btn-s btn-d" onclick="cd('{{ d.name or oid(d) }}',function(){api('DELETE','/api/device/{{ d._org_id }}/{{ d._user_id }}/{{ oid(d) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
 </tr>{% endfor %}
 {% if not devices %}<tr><td colspan="6" class="empty">暂无设备</td></tr>{% endif %}
 </table></div></div>
@@ -790,7 +797,7 @@ def devices_page():
 <div class="card"><div class="card-hd"><h2>未注册设备</h2></div>
 <div class="card-bd"><table><tr><th>设备ID</th><th>名称</th><th>平台</th></tr>
 {% for d in unregistered %}<tr>
-<td>{{ d._id or d.id }}</td>
+<td>{{ oid(d) }}</td>
 <td>{{ d.name or '-' }}</td>
 <td>{{ d.platform or '-' }}</td>
 </tr>{% endfor %}
@@ -809,8 +816,8 @@ def admins_page():
 <div class="card-bd"><table><tr><th>用户名</th><th>操作</th></tr>
 {% for a in admins %}<tr>
 <td>{{ a.username or a.name }}</td>
-<td class="btns"><a href="/admin/{{ a._id }}/audit" class="btn btn-s">审计</a>
-<button class="btn btn-s btn-d" onclick="cd('{{ a.username }}',function(){api('DELETE','/api/admin/{{ a._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
+<td class="btns"><a href="/admin/{{ oid(a) }}/audit" class="btn btn-s">审计</a>
+<button class="btn btn-s btn-d" onclick="cd('{{ a.username }}',function(){api('DELETE','/api/admin/{{ oid(a) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})})">删除</button></td>
 </tr>{% endfor %}
 {% if not admins %}<tr><td colspan="2" class="empty">暂无管理员</td></tr>{% endif %}
 </table></div></div>
@@ -853,7 +860,7 @@ def logs_page():
 <td>{{ l.timestamp }}</td>
 <td><span class="tag {{'tag-r' if l.level=='error' else 'tag-b' if l.level=='warning' else 'tag-gray'}}">{{ l.level }}</span></td>
 <td>{{ l.message }}</td>
-<td><button class="btn btn-s btn-d" onclick="api('DELETE','/api/log/{{ l._id }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">删除</button></td>
+<td><button class="btn btn-s btn-d" onclick="api('DELETE','/api/log/{{ oid(l) }}',null,function(r){if(r.error)toast(r.error,'r');else location.reload()})">删除</button></td>
 </tr>{% endfor %}
 {% if not logs %}<tr><td colspan="4" class="empty">暂无日志</td></tr>{% endif %}
 </table></div></div>'''
@@ -1220,7 +1227,10 @@ def subscription_page():
 @app.route('/ping')
 def ping():
     r = api.get('/ping')
-    return jsonify(r.json() if r.status_code==200 else {'error': 'unavailable'})
+    try:
+        return jsonify(r.json() if r.status_code==200 else {'error': 'unavailable'})
+    except:
+        return jsonify({'status': 'ok' if r.status_code==200 else 'error'})
 
 # ====== 服务器输出 ======
 @app.route('/sv/<sid>/output')
